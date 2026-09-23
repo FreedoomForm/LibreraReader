@@ -92,7 +92,8 @@ public abstract class DocumentController {
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, //onCrop
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, //
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, //
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT//
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT, //
+            ActivityInfo.SCREEN_ORIENTATION_FULL_USER//
                                                                     );
 
     public final static List<Integer> orientationTexts = Arrays.asList(//
@@ -100,8 +101,9 @@ public abstract class DocumentController {
             R.string.automatic, //
             R.string.landscape, //
             R.string.portrait, //
-            R.string.landscape_180, //
-            R.string.portrait_180);
+            R.string.landscape_180, , //
+            R.string.portrait_180            R.string.automatic//
+                    );
 
     protected final Activity activity;
     private final LinkedList<Integer> linkHistory = new LinkedList<Integer>();
@@ -161,7 +163,8 @@ public abstract class DocumentController {
     }
 
     public static int getRotationText() {
-        return orientationTexts.get(orientationIds.indexOf(AppState.get().orientation));
+        int oi = orientationIds.indexOf(AppState.get().orientation);
+        return orientationTexts.get(oi < 0 ? 1 : oi); // unknown saved value -> automatic
     }
 
     public static boolean isEinkOrMode(Context c) {
