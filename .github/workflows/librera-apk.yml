@@ -24,6 +24,15 @@ jobs:
       - name: Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      - name: Dummy release signing properties (CI-only; debug build never uses them)
+        run: |
+          cat >> gradle.properties <<'PROPS'
+          RELEASE_STORE_FILE=dummy-release.jks
+          RELEASE_STORE_PASSWORD=dummy
+          RELEASE_KEY_ALIAS=dummy
+          RELEASE_KEY_PASSWORD=dummy
+          PROPS
+
       - name: Bundle Kokoro model (offline TTS, int8)
         run: |
           python3 - <<'PYEOF'
