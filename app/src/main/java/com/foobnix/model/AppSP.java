@@ -27,6 +27,7 @@ public class AppSP {
     public int lastFontSize = 0;
     public String lastBookLang = "";
     public boolean isLocked = false;
+    public boolean kokoroDefaultMigrated = false;
     public boolean isFirstTimeVertical = true;
     public boolean isFirstTimeHorizontal = true;
 

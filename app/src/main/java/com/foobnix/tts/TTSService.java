@@ -1016,6 +1016,24 @@ import java.util.List;
             EventBus.getDefault()
                     .post(new MessagePageNumber(pageNumber));
             AppSP.get().lastBookPage = pageNumber;
+
+            // Document open + page text extraction are expensive (up to seconds on
+            // large PDFs) and used to run on the service main thread, freezing the
+            // UI every time Play was pressed. Run the heavy tail on a worker.
+            ttsWorker.execute(new Runnable() {
+                public void run() {
+                    playPageHeavy(preText, pageNumber, anchor);
+                }
+            });
+        
+    
+    }
+
+    /** Single worker for TTS document work: keeps Play responsive. */
+    private final java.util.concurrent.ExecutorService ttsWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    private void playPageHeavy(String preText, int pageNumber, String anchor) {
+        
             CodecDocument dc = getDC();
             if (dc == null) {
                 LOG.d(TAG, "CodecDocument", "is NULL");
@@ -1204,7 +1222,7 @@ import java.util.List;
                 SharedBooks.saveAsync(load);
                 AppProfile.save(this);
             }, "@T TTS Save").start();
-        }
+        
     }
 
     @Override public void onDestroy() {

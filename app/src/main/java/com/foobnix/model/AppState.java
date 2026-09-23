@@ -482,7 +482,7 @@ public class AppState {
     @IgnoreHashCode public boolean isRememberDictionary;
     public String fromLang = "en";
     public String toLang = Urls.getLangCode();
-    @IgnoreHashCode public int orientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR;
+    @IgnoreHashCode public int orientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
     public int previousLibraryMode = MODE_GRID;
     public int libraryMode = MODE_GRID;
     public int broseMode = MODE_LIST;

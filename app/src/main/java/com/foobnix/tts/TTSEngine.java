@@ -410,13 +410,13 @@ public class TTSEngine {
             }
         });
 
-        if (ttsEngine == null) {
-            LOG.d(TAG, "speek: no TTS engine available");
+        if (AppState.get().ttsUseKokoro) {
+            kokoroSpeakLocked(text);
             return;
         }
 
-        if (AppState.get().ttsUseKokoro) {
-            kokoroSpeakLocked(text);
+        if (ttsEngine == null) {
+            LOG.d(TAG, "speek: no TTS engine available");
             return;
         }
 

@@ -1,6 +1,8 @@
 package com.foobnix;
 
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
+import com.foobnix.model.AppSP;
+import com.foobnix.model.AppState;
 
 import android.app.Application;
 import android.content.Context;
@@ -79,6 +81,20 @@ public class LibreraApp extends Application {
         AppsConfig.init(this);
         Dips.init(this);
         Prefs.get().init(this);
+
+        try {
+            // One-time migration: older builds shipped with the system TTS selected and
+            // the saved profile kept overriding the new Kokoro default. Flip it once so
+            // existing installs get the offline AI voice without touching settings.
+            if (AppSP.get() != null && !AppSP.get().kokoroDefaultMigrated) {
+                AppSP.get().kokoroDefaultMigrated = true;
+                AppState.get().ttsUseKokoro = true;
+                AppState.get().save(this);
+                LOG.d("LibreraApp", "migration: offline AI voice (Kokoro) enabled by default");
+            }
+        } catch (Throwable t) {
+            LOG.e(t);
+        }
 
         try {
             if (AppsConfig.isShowAdsInApp(this)) {

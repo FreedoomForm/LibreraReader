@@ -89,7 +89,8 @@ public class MenuBuilderM {
     public static PopupMenu addOrientationMenu(final View view, final Activity a, final PopupMenu popupMenu) {
         String title = a.getString(R.string.orientation) + ": ";
 
-        if (AppState.get().orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR) {
+        if (AppState.get().orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                || AppState.get().orientation == ActivityInfo.SCREEN_ORIENTATION_FULL_USER) {
             title += a.getString(R.string.automatic);
         } else if (AppState.get().orientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) {
             title += a.getString(R.string.portrait);
@@ -118,7 +119,7 @@ public class MenuBuilderM {
 
             @Override
             public boolean onMenuItemClick(final MenuItem item) {
-                AppState.get().orientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR;
+                AppState.get().orientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
                 DocumentController.doRotation(a);
                 return false;
             }

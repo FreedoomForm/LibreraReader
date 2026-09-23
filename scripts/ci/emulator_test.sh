@@ -83,4 +83,10 @@ if [ -z "$BACK_PID" ]; then
   exit 1
 fi
 grep -m 5 "Kokoro\|TTSService\|keep-alive" logcat-tts.txt || true
-echo "EMULATOR SMOKE TEST PASSED: launch + TTS playback + back-key survival"
+KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
+            echo "KokoroEngine log lines: $KOK"
+            if [ "$KOK" == "0" ]; then
+              echo "::error::KOKORO ENGINE NOT USED - default TTS path is active instead of the offline AI voice"
+              exit 1
+            fi
+            echo "EMULATOR SMOKE TEST PASSED: launch + Kokoro TTS playback + back-key survival"

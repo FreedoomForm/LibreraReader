@@ -568,10 +568,15 @@ public abstract class DocumentController {
 
     public static void doRotation(final Activity a) {
         try {
-            // LOG.d("isSystemAutoRotation isSystemAutoRotation",
-            // Dips.isSystemAutoRotation(a));
-            // LOG.d("isSystemAutoRotation geUserRotation", Dips.geUserRotation(a));
-            a.setRequestedOrientation(AppState.get().orientation);
+            int o = AppState.get().orientation;
+            // SCREEN_ORIENTATION_SENSOR ignores the system rotation lock and keeps
+            // rotating even when the user has disabled auto-rotate. FULL_USER follows
+            // the user's rotation setting: sensor-driven when unlocked, locked when not.
+            if (o == ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                    || o == ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
+                o = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
+            }
+            a.setRequestedOrientation(o);
         } catch (Exception e) {
             LOG.e(e);
         }
