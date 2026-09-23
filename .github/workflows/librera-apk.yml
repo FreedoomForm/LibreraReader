@@ -1,0 +1,69 @@
+name: Build Librera AI APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Bundle Kokoro model (offline TTS, int8)
+        run: |
+          SHA=$(cat kokoro-model-pin.txt)
+          git clone --no-checkout --filter=blob:none https://huggingface.co/csukuangfj/kokoro-int8-multi-lang-v1_0 /tmp/kokoro-src
+          cd /tmp/kokoro-src
+          git fetch --depth 1 origin "$SHA"
+          git checkout FETCH_HEAD
+          DEST="$GITHUB_WORKSPACE/app/src/main/assets/kokoro"
+          mkdir -p "$DEST"
+          cp model.int8.onnx voices.bin tokens.txt lexicon-us-en.txt lexicon-gb-en.txt lexicon-zh.txt date-zh.fst number-zh.fst phone-zh.fst "$DEST/"
+          cp -r espeak-ng-data "$DEST/"
+          cp -r dict "$DEST/"
+          du -sh "$DEST"
+
+      - name: Build APK (fdroid flavor, debug)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleFdroidDebug --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          APK=$(find app/build/outputs/apk -name "*fdroid*debug*.apk" | head -1)
+          cp "$APK" dist/Librera-AI-Kokoro.apk
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: librera-ai-apk
+          path: dist/Librera-AI-Kokoro.apk
+
+      - name: Publish to release (tag librera-apk-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: librera-apk-latest
+          name: "Librera Reader - Offline AI TTS (Kokoro-82M)"
+          files: dist/Librera-AI-Kokoro.apk
+          prerelease: true
+          allow_updates: true
+          replaces_artifacts: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
