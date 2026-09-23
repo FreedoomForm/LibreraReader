@@ -31,6 +31,36 @@ jobs:
           RELEASE_STORE_PASSWORD=dummy
           RELEASE_KEY_ALIAS=dummy
           RELEASE_KEY_PASSWORD=dummy
+          librera_appGdriveKey=
+          librera_admobAppId=
+          librera_admobBannerId=
+          librera_admobFullId=
+          librera_admobRewardId=
+          pro_appGdriveKey=
+          pro_admobAppId=
+          pro_admobBannerId=
+          pro_admobFullId=
+          pro_admobRewardId=
+          pdf_classic_appGdriveKey=
+          pdf_classic_admobAppId=
+          pdf_classic_admobBannerId=
+          pdf_classic_admobFullId=
+          pdf_classic_admobRewardId=
+          ebooka_appGdriveKey=
+          ebooka_admobAppId=
+          ebooka_admobBannerId=
+          ebooka_admobFullId=
+          ebooka_admobRewardId=
+          epub_reader_appGdriveKey=
+          epub_reader_admobAppId=
+          epub_reader_admobBannerId=
+          epub_reader_admobFullId=
+          epub_reader_admobRewardId=
+          tts_reader_appGdriveKey=
+          tts_reader_admobAppId=
+          tts_reader_admobBannerId=
+          tts_reader_admobFullId=
+          tts_reader_admobRewardId=
           PROPS
 
       - name: Bundle Kokoro model (offline TTS, int8)
