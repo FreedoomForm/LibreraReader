@@ -139,7 +139,12 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p dist
-          APK=$(find app/build/outputs/apk -name "*fdroid*debug*.apk" | head -1)
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          echo "Found APK: $APK"
+          if [ -z "$APK" ]; then
+            find app/build/outputs -type f | head -30
+            exit 1
+          fi
           cp "$APK" dist/Librera-AI-Kokoro.apk
           ls -la dist
 
