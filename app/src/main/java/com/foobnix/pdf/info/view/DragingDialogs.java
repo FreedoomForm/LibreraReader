@@ -877,36 +877,42 @@ public class DragingDialogs {
                 TxtUtils.underlineTextView(ttsKokoroToggle);
                 TxtUtils.underlineTextView(ttsKokoroVoice);
                 if (AppState.get().ttsUseKokoro) {
-                    textEngine.setText("Kokoro-82M (AI)");
+                    textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 }
                 ttsKokoroToggle.setOnClickListener(new OnClickListener() {
                     @Override public void onClick(View v) {
                         AppState.get().ttsUseKokoro = !AppState.get().ttsUseKokoro;
                         AppState.get().save(v.getContext());
                         ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on : R.string.tts_kokoro_off);
-                        textEngine.setText(AppState.get().ttsUseKokoro ? "Kokoro-82M (AI)" : TTSEngine.get().getCurrentEngineName());
+                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
                         TTSEngine.get().stop();
                         org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
                     }
                 });
-                ttsKokoroVoice.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
+                final Runnable openKokoroVoicePicker = new Runnable() {
+                    @Override public void run() {
                         final String[] items = KokoroVoices.DISPLAY;
                         final int checked = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
-                        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(controller.getActivity());
+                        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(activity);
                         b.setTitle(R.string.tts_kokoro_voice);
                         b.setSingleChoiceItems(items, checked, new android.content.DialogInterface.OnClickListener() {
                             @Override public void onClick(android.content.DialogInterface dialog, int which) {
                                 AppState.get().ttsKokoroVoice = KokoroVoices.CODES[which];
-                                AppState.get().save(v.getContext());
+                                AppState.get().save(activity);
                                 ttsKokoroVoice.setText(KokoroVoices.DISPLAY[which]);
-                                dialog.dismiss();
                                 if (AppState.get().ttsUseKokoro) {
+                                    textEngine.setText(KokoroVoices.DISPLAY[which]);
                                     KokoroEngine.get().preview(which);
                                 }
+                                dialog.dismiss();
                             }
                         });
                         b.show();
+                    }
+                };
+                ttsKokoroVoice.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        openKokoroVoicePicker.run();
                     }
                 });
 
@@ -1055,7 +1061,7 @@ public class DragingDialogs {
 
                 TTSEngine.get().getTTS(new OnInitListener() {
                     @Override public void onInit(int status) {
-                        textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
                         ttsLang.setText(TTSEngine.get().getCurrentLang());
                         TxtUtils.bold(ttsLang);
                     }
@@ -1063,18 +1069,26 @@ public class DragingDialogs {
 
                 controller.runTimer(1000, new Runnable() {
                     @Override public void run() {
-                        textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
                         ttsLang.setText(TTSEngine.get().getCurrentLang());
                         TxtUtils.bold(ttsLang);
                     }
                 });
 
-                textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
                 ttsLang.setText(TTSEngine.get().getCurrentLang());
                 TxtUtils.bold(ttsLang);
 
                 View ttsSettings = view.findViewById(R.id.ttsSettings);
-                textEngine.setOnClickListener((v) -> ttsSettings.performClick());
+                textEngine.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        if (AppState.get().ttsUseKokoro) {
+                            openKokoroVoicePicker.run();
+                        } else {
+                            ttsSettings.performClick();
+                        }
+                    }
+                });
                 ttsLang.setOnClickListener((v) -> ttsSettings.performClick());
 
                 TxtUtils.underlineTextView(ttsSettings).setOnClickListener(new OnClickListener() {

@@ -818,6 +818,7 @@ public class TTSEngine {
             return;
         }
         final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
+        LOG.d(TAG, "kokoro voice", AppState.get().ttsKokoroVoice, "sid", sid);
         float sp = AppState.get().ttsSpeed;
         if (sp <= 0 || sp > 4) {
             sp = 1.0f;
