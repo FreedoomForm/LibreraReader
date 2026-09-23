@@ -26,17 +26,42 @@ jobs:
 
       - name: Bundle Kokoro model (offline TTS, int8)
         run: |
-          SHA=$(cat kokoro-model-pin.txt)
-          git clone --no-checkout --filter=blob:none https://huggingface.co/csukuangfj/kokoro-int8-multi-lang-v1_0 /tmp/kokoro-src
-          cd /tmp/kokoro-src
-          git fetch --depth 1 origin "$SHA"
-          git checkout FETCH_HEAD
-          DEST="$GITHUB_WORKSPACE/app/src/main/assets/kokoro"
-          mkdir -p "$DEST"
-          cp model.int8.onnx voices.bin tokens.txt lexicon-us-en.txt lexicon-gb-en.txt lexicon-zh.txt date-zh.fst number-zh.fst phone-zh.fst "$DEST/"
-          cp -r espeak-ng-data "$DEST/"
-          cp -r dict "$DEST/"
-          du -sh "$DEST"
+          python3 - <<'PYEOF'
+          import json, urllib.request, os, sys
+          from concurrent.futures import ThreadPoolExecutor
+          REPO = 'csukuangfj/kokoro-int8-multi-lang-v1_0'
+          PIN = open('kokoro-model-pin.txt').read().strip()
+          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + REPO))
+          if meta.get('sha') != PIN:
+              sys.exit('Model pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), PIN))
+          tree = json.load(urllib.request.urlopen(
+              'https://huggingface.co/api/models/%s/tree/main?recursive=true' % REPO))
+          files = [f for f in tree if f.get('type') == 'file' and 'path' in f]
+          if len(files) < 110:
+              sys.exit('Tree listing looks incomplete: %d files' % len(files))
+          dest = os.path.join(os.environ['GITHUB_WORKSPACE'], 'app/src/main/assets/kokoro')
+          def dl(f):
+              p = f['path']
+              out = os.path.join(dest, p)
+              os.makedirs(os.path.dirname(out), exist_ok=True)
+              url = 'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, p)
+              last = None
+              for attempt in range(3):
+                  try:
+                      urllib.request.urlretrieve(url, out)
+                      got = os.path.getsize(out)
+                      if int(f.get('size', got)) != got:
+                          raise IOError('size mismatch %s: %d != %d' % (p, got, f.get('size')))
+                      return
+                  except Exception as e:
+                      last = e
+              raise last
+          with ThreadPoolExecutor(6) as ex:
+              list(ex.map(dl, files))
+          total = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(dest) for fn in fns)
+          print('Bundled %d files, %.1f MB' % (len(files), total / 1048576.0))
+          PYEOF
+          du -sh app/src/main/assets/kokoro
 
       - name: Build APK (fdroid flavor, debug)
         run: |
