@@ -51,6 +51,11 @@ jobs:
           ebooka_admobBannerId=
           ebooka_admobFullId=
           ebooka_admobRewardId=
+          pdf_v2_appGdriveKey=
+          pdf_v2_admobAppId=
+          pdf_v2_admobBannerId=
+          pdf_v2_admobFullId=
+          pdf_v2_admobRewardId=
           epub_reader_appGdriveKey=
           epub_reader_admobAppId=
           epub_reader_admobBannerId=
