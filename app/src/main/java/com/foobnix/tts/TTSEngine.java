@@ -819,8 +819,8 @@ public class TTSEngine {
         }
         final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
         float sp = AppState.get().ttsSpeed;
-        if (sp <= 0) {
-            sp = 0.01f;
+        if (sp <= 0 || sp > 4) {
+            sp = 1.0f;
         }
         final float speed = sp;
         kok.stopInternal();

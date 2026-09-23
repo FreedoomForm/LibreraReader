@@ -120,9 +120,9 @@ android {
         fdroid {
             minSdk = libs.versions.minSdk.get().toInteger()
             dimension = "version"
-            applicationId = "com.foobnix.pro.pdf.reader"
+            applicationId = "com.foobnix.pdf.reader.ai"
             manifestPlaceholders = [
-                    appName      : "Librera FD",
+                    appName      : "Librera AI",
                     appIcon      : "@mipmap/icon_pdf_pro",
                     appRoundIcon : "@mipmap/icon_pdf_pro",
                     appGdriveKey : "",

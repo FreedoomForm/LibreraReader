@@ -81,7 +81,7 @@ jobs:
               {
                 "client_info": {
                   "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
-                  "android_client_info": { "package_name": "com.foobnix.pro.pdf.reader" }
+                  "android_client_info": { "package_name": "com.foobnix.pdf.reader.ai" }
                 },
                 "oauth_client": [],
                 "api_key": [ { "current_key": "AIzaSyDUMMYKEY0000000000000000000000000" } ],
@@ -135,6 +135,25 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleFdroidDebug --no-daemon --stacktrace
+
+      - name: Verify APK contents + JNI symbols
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | grep -i arm64 | head -1)
+          if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk -name "*.apk" | sort | head -1); fi
+          echo "Verifying: $APK"
+          python3 scripts/ci/verify_apk.py "$APK" app/src/main/java/com/k2fsa/sherpa/onnx
+
+      - name: Functional TTS smoke test (real synthesis with the shipped model)
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | grep -i arm64 | head -1)
+          if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk -name "*.apk" | sort | head -1); fi
+          rm -rf /tmp/ktest && mkdir -p /tmp/ktest
+          unzip -q "$APK" 'assets/kokoro/*' -d /tmp/ktest
+          D=/tmp/ktest/assets/kokoro
+          du -sh "$D"
+          pip install -q sherpa-onnx
+          python3 scripts/ci/tts_smoke_test.py "$D" /tmp/ktest/test.wav
+          python3 scripts/ci/check_wav.py /tmp/ktest/test.wav
 
       - name: Collect APK
         run: |

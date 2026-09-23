@@ -412,7 +412,7 @@ public class AppState {
     @IgnoreHashCode public String ttsSentecesDivs = TTS_PUNCUATIONS;
     @IgnoreHashCode public boolean ttsTunnOnLastWord = false;
     // Offline AI TTS (Kokoro-82M, bundled in the APK)
-    public volatile boolean ttsUseKokoro = false;
+    public volatile boolean ttsUseKokoro = true;
     public volatile String ttsKokoroVoice = "af_heart";
     @IgnoreHashCode public boolean isEnalbeTTSReplacements = true;
     public boolean isReferenceMode = false;

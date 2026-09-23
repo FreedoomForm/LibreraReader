@@ -60,6 +60,7 @@ public class KokoroEngine {
     private volatile AudioTrack track;
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
+    private final java.util.List<Runnable> pendingOnReady = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
 
     public boolean isReady() {
         return ready && tts != null;
@@ -77,6 +78,9 @@ public class KokoroEngine {
             }
             return;
         }
+        if (onReady != null) {
+            pendingOnReady.add(onReady);
+        }
         if (preparing) {
             return;
         }
@@ -86,14 +90,19 @@ public class KokoroEngine {
             public void run() {
                 try {
                     prepareInternal();
-                    if (onReady != null) {
-                        onReady.run();
+                    for (Runnable r : pendingOnReady) {
+                        try {
+                            r.run();
+                        } catch (Throwable t) {
+                            LOG.e(t);
+                        }
                     }
                 } catch (Throwable e) {
                     LOG.e(e);
                     ready = false;
                     toastSafe("AI TTS init failed: " + e.getClass().getSimpleName());
                 } finally {
+                    pendingOnReady.clear();
                     preparing = false;
                 }
             }
