@@ -882,7 +882,7 @@ public class DragingDialogs {
                 ttsKokoroToggle.setOnClickListener(new OnClickListener() {
                     @Override public void onClick(View v) {
                         AppState.get().ttsUseKokoro = !AppState.get().ttsUseKokoro;
-                        AppState.get().save();
+                        AppState.get().save(v.getContext());
                         ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on : R.string.tts_kokoro_off);
                         textEngine.setText(AppState.get().ttsUseKokoro ? "Kokoro-82M (AI)" : TTSEngine.get().getCurrentEngineName());
                         TTSEngine.get().stop();
@@ -898,7 +898,7 @@ public class DragingDialogs {
                         b.setSingleChoiceItems(items, checked, new android.content.DialogInterface.OnClickListener() {
                             @Override public void onClick(android.content.DialogInterface dialog, int which) {
                                 AppState.get().ttsKokoroVoice = KokoroVoices.CODES[which];
-                                AppState.get().save();
+                                AppState.get().save(v.getContext());
                                 ttsKokoroVoice.setText(KokoroVoices.DISPLAY[which]);
                                 dialog.dismiss();
                                 if (AppState.get().ttsUseKokoro) {

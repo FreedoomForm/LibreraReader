@@ -326,8 +326,6 @@ public class TTSEngine {
         if (ttsEngine != null) {
             if (Build.VERSION.SDK_INT >= 15) {
                 ttsEngine.setOnUtteranceProgressListener(l);
-            } else {
-                ttsEngine.setOnUtteranceCompletedListener(l);
             }
         }
     }
