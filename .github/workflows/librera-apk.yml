@@ -131,6 +131,21 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/kokoro
 
+      - name: Add x86_64 native libs (for emulator smoke test)
+        run: |
+          set -e
+          mkdir -p app/src/main/jniLibs/x86_64
+          curl -sL -o /tmp/ort.aar "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.28.2/onnxruntime-android-1.28.2.aar"
+          unzip -q -o /tmp/ort.aar "jni/x86_64/*" -d /tmp/ort
+          cp /tmp/ort/jni/x86_64/libonnxruntime.so app/src/main/jniLibs/x86_64/
+          SHP_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-android.tar.bz2"
+          curl -sL -o /tmp/shp.tar.bz2 "$SHP_URL"
+          mkdir -p /tmp/shp && tar -xjf /tmp/shp.tar.bz2 -C /tmp/shp
+          SHP=$(find /tmp/shp -name "libsherpa-onnx-jni.so" -path "*x86_64*" | head -1)
+          echo "found: $SHP"
+          cp "$SHP" app/src/main/jniLibs/x86_64/
+          ls -la app/src/main/jniLibs/x86_64/
+
       - name: Build APK (fdroid flavor, debug)
         run: |
           chmod +x gradlew
@@ -155,7 +170,7 @@ jobs:
           python3 scripts/ci/tts_smoke_test.py "$D" /tmp/ktest/test.wav
           python3 scripts/ci/check_wav.py /tmp/ktest/test.wav
 
-      - name: Collect APK
+      - name: Collect APKs
         run: |
           mkdir -p dist
           find app/build/outputs/apk -name "*.apk" -exec du -h {} \;
@@ -172,13 +187,92 @@ jobs:
             exit 1
           fi
           cp "$APK" dist/Librera-AI-Kokoro.apk
+          X86=$(find app/build/outputs/apk -name "*.apk" | grep -i "x86_64" | head -1)
+          if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-Kokoro-x86_64.apk; fi
           ls -la dist
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: librera-ai-apk
-          path: dist/Librera-AI-Kokoro.apk
+          name: librera-apks
+          path: dist/*.apk
+
+  emulator-test:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 45
+    steps:
+      - name: Setup JDK (for sdkmanager/aapt)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Download APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: librera-apks
+          path: dist
+
+      - name: Run app on emulator (Android 14 / api 34, x86_64)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            APK=$(find dist -name "*x86_64*.apk" | head -1)
+            echo "Installing: $APK"
+            adb install -r "$APK"
+            PKG=com.foobnix.pdf.reader.ai
+            AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -1)
+            LAUNCHER=$("$AAPT" dump badging "$APK" | grep launchable-activity | sed -E "s/.*name='([^']+)'.*/\1/")
+            echo "Package: $PKG  Launcher: $LAUNCHER"
+            adb shell am start -W -n "$PKG/$LAUNCHER"
+            sleep 40
+            adb logcat -d > logcat.txt || true
+            PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
+            echo "App PID: $PID"
+            FATALS=$(grep -c "FATAL EXCEPTION" logcat.txt || true)
+            ANRS=$(grep -c "ANR in " logcat.txt || true)
+            echo "FATAL EXCEPTIONS: $FATALS | ANRs: $ANRS | Android: $(adb shell getprop ro.build.version.release | tr -d '\r')"
+            if [ -z "$PID" ]; then
+              echo "::error::APP CRASHED ON EMULATOR - process not alive after start"
+              grep -A 50 "FATAL EXCEPTION" logcat.txt || true
+              exit 1
+            fi
+            if [ "$FATALS" != "0" ]; then
+              echo "::error::FATAL EXCEPTION found in logcat"
+              grep -A 50 "FATAL EXCEPTION" logcat.txt
+              exit 1
+            fi
+            adb shell uiautomator dump /sdcard/ui.xml || true
+            adb pull /sdcard/ui.xml ui.xml || true
+            if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
+            echo "EMULATOR SMOKE TEST PASSED: app launched and stayed alive with no crashes"
+
+      - name: Upload logcat + UI dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-logcat
+          path: |
+            logcat.txt
+            ui.xml
+          if-no-files-found: ignore
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, emulator-test]
+    steps:
+      - name: Download APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: librera-apks
+          path: dist
 
       - name: Publish to release (tag librera-apk-latest)
         uses: softprops/action-gh-release@v2
