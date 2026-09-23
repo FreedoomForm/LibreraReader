@@ -256,12 +256,17 @@ jobs:
           name: librera-apks
           path: dist
 
+      - name: Generate SHA256SUMS
+        run: sha256sum dist/*.apk > dist/SHA256SUMS.txt
+
       - name: Publish to release (tag librera-apk-latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: librera-apk-latest
           name: "Librera Reader - Offline AI TTS (Kokoro-82M)"
-          files: dist/Librera-AI-Kokoro.apk
+          files: |
+            dist/Librera-AI-Kokoro.apk
+            dist/SHA256SUMS.txt
           prerelease: true
           allow_updates: true
           replaces_artifacts: true

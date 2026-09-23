@@ -89,6 +89,8 @@ android {
         }
         debug {
             debuggable = true
+            // stable CI signature: same key across all builds (committed keystore)
+            signingConfig = signingConfigs.release
         }
     }
 
