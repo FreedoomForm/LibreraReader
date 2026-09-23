@@ -49,15 +49,15 @@ if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
 
 # ---------- 2. TTS PLAYBACK TEST (Kokoro via TTSService) ----------
 printf 'Hello world. This is an offline text to speech test. Kokoro reads this sentence aloud on the emulator.' > ttsbook.txt
-adb push ttsbook.txt /sdcard/Download/librera_tts_test.txt
+adb shell mkdir -p /storage/emulated/0/Android/data/$PKG/files
+            adb push ttsbook.txt /storage/emulated/0/Android/data/$PKG/files/librera_tts_test.txt
 echo "Starting TTSService (Kokoro) on the pushed text file..."
 adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
   -a ACTION_PLAY_CURRENT_PAGE \
   --ei INT 0 \
-  --es EXTRA_PATH /sdcard/Download/librera_tts_test.txt \
-  --es EXTRA_ANCHOR "" \
+  --es EXTRA_PATH /storage/emulated/0/Android/data/$PKG/files/librera_tts_test.txt \
   --ei EXTRA_W 1080 --ei EXTRA_H 2400 || true
-sleep 75
+sleep 100
 adb logcat -d > logcat-tts.txt || true
 TTS_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
 FG=$(adb shell dumpsys activity services "$PKG" 2>/dev/null | grep -c "isForeground" || true)

@@ -873,6 +873,10 @@ import java.util.List;
 
     public CodecDocument getDC() {
         try {
+            // A background TTS load must not inherit a stale UI-side cancel flag
+            // (LibreraApp flips it on memory cleanup); otherwise openDocument
+            // silently returns null and background reading never starts.
+            TempHolder.get().loadingCancelled.set(false);
 
             if (AppSP.get().lastBookPath != null && AppSP.get().lastBookPath.equals(
                     path) && cache != null && wh == AppSP.get().lastBookWidth + AppSP.get().lastBookHeight) {
