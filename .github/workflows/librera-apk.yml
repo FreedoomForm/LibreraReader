@@ -68,6 +68,30 @@ jobs:
           tts_reader_admobRewardId=
           PROPS
 
+      - name: Dummy google-services.json (CI-only, fdroid debug build)
+        run: |
+          cat > app/google-services.json <<'GSJ'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "dummy-project-id",
+              "storage_bucket": "dummy-project-id.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": { "package_name": "com.foobnix.pro.pdf.reader" }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "AIzaSyDUMMYKEY0000000000000000000000000" } ],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          GSJ
+
       - name: Bundle Kokoro model (offline TTS, int8)
         run: |
           python3 - <<'PYEOF'
