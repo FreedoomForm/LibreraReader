@@ -83,10 +83,20 @@ if [ -z "$BACK_PID" ]; then
   exit 1
 fi
 grep -m 5 "Kokoro\|TTSService\|keep-alive" logcat-tts.txt || true
-KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
-            echo "KokoroEngine log lines: $KOK"
-            if [ "$KOK" == "0" ]; then
-              echo "::error::KOKORO ENGINE NOT USED - default TTS path is active instead of the offline AI voice"
+# Deterministic Kokoro check: the engine unpacks its model to files/kokoro on
+# first use (logcat tags are gated by AppsConfig.IS_LOG, so they may be absent)
+if adb shell run-as com.foobnix.pdf.reader.ai test -f files/kokoro/model.int8.onnx; then
+              echo "KOKORO MODEL EXTRACTED - offline AI engine path was used"
+            else
+              echo "::error::KOKORO ENGINE NOT USED - model was never unpacked"
+              exit 1
+            fi
+            KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
+            echo "KokoroEngine log lines (informational): $KOK"
+            ULE=$(grep -c "UnsatisfiedLinkError" logcat-tts.txt || true)
+            if [ "$ULE" != "0" ]; then
+              echo "::error::UnsatisfiedLinkError during TTS - native libs broken"
+              grep -m 3 -A 10 "UnsatisfiedLinkError" logcat-tts.txt
               exit 1
             fi
             echo "EMULATOR SMOKE TEST PASSED: launch + Kokoro TTS playback + back-key survival"
