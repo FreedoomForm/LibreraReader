@@ -201,6 +201,9 @@ jobs:
     needs: build
     timeout-minutes: 45
     steps:
+      - name: Checkout (test script)
+        uses: actions/checkout@v4
+
       - name: Setup JDK (for sdkmanager/aapt)
         uses: actions/setup-java@v4
         with:
@@ -212,9 +215,6 @@ jobs:
         with:
           name: librera-apks
           path: dist
-
-      - name: Checkout (test script)
-        uses: actions/checkout@v4
 
       - name: Enable KVM access (fix TCG software-emulation fallback)
         run: |
