@@ -27,7 +27,7 @@ jobs:
       - name: Bundle Kokoro model (offline TTS, int8)
         run: |
           python3 - <<'PYEOF'
-          import json, urllib.request, os, sys
+          import json, urllib.request, urllib.parse, os, sys
           from concurrent.futures import ThreadPoolExecutor
           REPO = 'csukuangfj/kokoro-int8-multi-lang-v1_0'
           PIN = open('kokoro-model-pin.txt').read().strip()
@@ -44,7 +44,7 @@ jobs:
               p = f['path']
               out = os.path.join(dest, p)
               os.makedirs(os.path.dirname(out), exist_ok=True)
-              url = 'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, p)
+              url = 'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, urllib.parse.quote(p, safe='/'))
               last = None
               for attempt in range(3):
                   try:
