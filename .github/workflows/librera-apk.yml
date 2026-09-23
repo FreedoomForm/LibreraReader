@@ -139,12 +139,13 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p dist
-          APK=$(find app/build/outputs/apk -name "*arm64-v8a*.apk" | head -1)
+          find app/build/outputs/apk -name "*.apk" -exec du -h {} \;
+          APK=$(find app/build/outputs/apk -name "*.apk" | grep -i "arm64" | head -1)
           if [ -z "$APK" ]; then
-            APK=$(find app/build/outputs/apk -name "*universal*.apk" | head -1)
+            APK=$(find app/build/outputs/apk -name "*.apk" | grep -i "universal" | head -1)
           fi
           if [ -z "$APK" ]; then
-            APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+            APK=$(find app/build/outputs/apk -name "*.apk" | sort | head -1)
           fi
           echo "Found APK: $APK"
           if [ -z "$APK" ]; then
