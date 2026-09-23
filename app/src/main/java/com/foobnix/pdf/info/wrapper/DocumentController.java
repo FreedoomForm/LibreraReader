@@ -101,8 +101,9 @@ public abstract class DocumentController {
             R.string.automatic, //
             R.string.landscape, //
             R.string.portrait, //
-            R.string.landscape_180, , //
-            R.string.portrait_180            R.string.automatic//
+            R.string.landscape_180, //
+            R.string.portrait_180, //
+            R.string.automatic//
                     );
 
     protected final Activity activity;
