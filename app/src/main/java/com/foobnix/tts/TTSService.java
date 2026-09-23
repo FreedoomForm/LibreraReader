@@ -1025,7 +1025,7 @@ import java.util.List;
                     playPageHeavy(preText, pageNumber, anchor);
                 }
             });
-        
+        }
     
     }
 
@@ -1222,8 +1222,7 @@ import java.util.List;
                 SharedBooks.saveAsync(load);
                 AppProfile.save(this);
             }, "@T TTS Save").start();
-        
-    }
+            }
 
     @Override public void onDestroy() {
         super.onDestroy();
