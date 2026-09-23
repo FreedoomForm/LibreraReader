@@ -695,4 +695,9 @@
    <string name="text_and_background_color">Text and Background Color</string>
    <string name="librerax_not_installed">LibreraX is not installed. Download and install it, then open the book again.</string>
    <string name="remove_library_folder">Remove this folder from the library? The files in it will not be deleted.</string>
+    <string name="tts_kokoro_title">AI voice (Kokoro)</string>
+    <string name="tts_kokoro_voice">AI voice (Kokoro)</string>
+    <string name="tts_kokoro_on">AI voice (Kokoro): ON</string>
+    <string name="tts_kokoro_off">AI voice (Kokoro): OFF</string>
+    <string name="tts_kokoro_init">Preparing offline AI voice\u2026</string>
 </resources>

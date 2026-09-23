@@ -280,7 +280,7 @@ import java.util.List;
             }
             return false;
         }
-        if (TTSEngine.get()
+        if (!AppState.get().ttsUseKokoro && TTSEngine.get()
                      .isInit() && TTSEngine.get()
                                            .getCurrentLang()
                                            .equals("---")) {
@@ -1050,8 +1050,7 @@ import java.util.List;
 
             if (Build.VERSION.SDK_INT >= 15) {
                 TTSEngine.get()
-                         .getTTS()
-                         .setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                         .setKokoroProgressListenerCompat(new UtteranceProgressListener() {
                              @Override public void onStart(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onStart", utteranceId);
                              }
@@ -1104,8 +1103,7 @@ import java.util.List;
                          });
             } else {
                 TTSEngine.get()
-                         .getTTS()
-                         .setOnUtteranceCompletedListener(new OnUtteranceCompletedListener() {
+                         .setKokoroLegacyListenerCompat(new OnUtteranceCompletedListener() {
                              @Override public void onUtteranceCompleted(String utteranceId) {
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();

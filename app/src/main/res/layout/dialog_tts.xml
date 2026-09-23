@@ -107,6 +107,28 @@
                 android:tint="@color/lt_grey" />
         </LinearLayout>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/ttsKokoroToggle"
+                style="@style/textLink"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="110dip"
+                android:text="@string/tts_kokoro_title" />
+
+            <TextView
+                android:id="@+id/ttsKokoroVoice"
+                android:lines="1"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/empy" />
+        </LinearLayout>
+
         <com.foobnix.pdf.info.view.CustomSeek
             android:id="@+id/seekBarSpeed"
             android:layout_width="match_parent"

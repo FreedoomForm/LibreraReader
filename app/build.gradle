@@ -111,6 +111,10 @@ android {
         }
     }
 
+    androidResources {
+        noCompress 'onnx'
+    }
+
     flavorDimensions.add("version")
     productFlavors {
         fdroid {

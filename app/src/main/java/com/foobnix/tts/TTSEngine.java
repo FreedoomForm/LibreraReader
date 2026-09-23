@@ -13,6 +13,7 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.TextToSpeech.EngineInfo;
 import android.speech.tts.TextToSpeech.OnInitListener;
 import android.speech.tts.TextToSpeech.OnUtteranceCompletedListener;
+import android.speech.tts.UtteranceProgressListener;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.widget.Toast;
 
@@ -26,6 +27,8 @@ import com.foobnix.mobi.parser.IOUtils;
 import com.foobnix.mobi.parser.MobiParserIS;
 import com.foobnix.model.AppBookmark;
 import com.foobnix.model.AppSP;
+import com.foobnix.ai.KokoroEngine;
+import com.foobnix.ai.KokoroVoices;
 import com.foobnix.model.AppState;
 import com.foobnix.pdf.info.BookmarksData;
 import com.foobnix.pdf.info.R;
@@ -62,6 +65,8 @@ public class TTSEngine {
     private static TTSEngine INSTANCE = new TTSEngine();
     volatile TextToSpeech ttsEngine;
     volatile MediaPlayer mp;
+    volatile UtteranceProgressListener kokoroProgressListener;
+    volatile OnUtteranceCompletedListener kokoroLegacyListener;
     Timer mTimer;
     Object helpObject = new Object();
     HashMap<String, String> map = new HashMap<String, String>();
@@ -139,6 +144,11 @@ public class TTSEngine {
 
     public void shutdown() {
         LOG.d(TAG, "shutdown");
+        try {
+            KokoroEngine.get().release();
+        } catch (Exception e) {
+            LOG.e(e);
+        }
 
         synchronized (helpObject) {
             if (ttsEngine != null) {
@@ -257,6 +267,16 @@ public class TTSEngine {
         }
 
         LOG.d(TAG, "stop");
+        if (AppState.get().ttsUseKokoro) {
+            try {
+                KokoroEngine.get().stopInternal();
+            } catch (Exception e) {
+                LOG.e(e);
+            }
+            EventBus.getDefault()
+                    .post(new TtsStatus());
+            return;
+        }
         synchronized (helpObject) {
 
             if (ttsEngine != null) {
@@ -275,6 +295,11 @@ public class TTSEngine {
     public void stopDestroy() {
         LOG.d(TAG, "stop");
         TxtUtils.dictHash = "";
+        try {
+            KokoroEngine.get().release();
+        } catch (Exception e) {
+            LOG.e(e);
+        }
         synchronized (helpObject) {
             if (ttsEngine != null) {
                 ttsEngine.shutdown();
@@ -290,6 +315,62 @@ public class TTSEngine {
             ttsEngine = new TextToSpeech(LibreraApp.context, listener, engine);
         }
         return ttsEngine;
+    }
+
+    /**
+     * Works for BOTH engines: stores the listener for the local AI (Kokoro) engine
+     * and forwards it to the system TextToSpeech when that one is active.
+     */
+    public void setKokoroProgressListenerCompat(UtteranceProgressListener l) {
+        kokoroProgressListener = l;
+        if (ttsEngine != null) {
+            if (Build.VERSION.SDK_INT >= 15) {
+                ttsEngine.setOnUtteranceProgressListener(l);
+            } else {
+                ttsEngine.setOnUtteranceCompletedListener(l);
+            }
+        }
+    }
+
+    public void setKokoroLegacyListenerCompat(OnUtteranceCompletedListener l) {
+        kokoroLegacyListener = l;
+        if (ttsEngine != null) {
+            ttsEngine.setOnUtteranceCompletedListener(l);
+        }
+    }
+
+    public void fireKokoroDone(String utteranceId) {
+        try {
+            if (kokoroProgressListener != null) {
+                kokoroProgressListener.onDone(utteranceId);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+        try {
+            if (kokoroLegacyListener != null) {
+                kokoroLegacyListener.onUtteranceCompleted(utteranceId);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
+
+    public void fireKokoroError(String utteranceId) {
+        try {
+            if (kokoroProgressListener != null) {
+                kokoroProgressListener.onError(utteranceId);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+        try {
+            if (kokoroLegacyListener != null) {
+                kokoroLegacyListener.onUtteranceCompleted(utteranceId);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
     }
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP) public void speek(final String text) {
@@ -333,6 +414,11 @@ public class TTSEngine {
 
         if (ttsEngine == null) {
             LOG.d(TAG, "speek: no TTS engine available");
+            return;
+        }
+
+        if (AppState.get().ttsUseKokoro) {
+            kokoroSpeakLocked(text);
             return;
         }
 
@@ -416,6 +502,11 @@ public class TTSEngine {
                 Toast.makeText(controller.getActivity(), R.string.msg_unexpected_error, Toast.LENGTH_SHORT)
                      .show();
             }
+            return;
+        }
+
+        if (AppState.get().ttsUseKokoro) {
+            speakToFileKokoro(controller, folder, info, from - 1, to);
             return;
         }
 
@@ -505,7 +596,7 @@ public class TTSEngine {
         if (AppState.get().isEnableAccessibility) {
             return true;
         }
-        return mp != null || ttsEngine != null;
+        return mp != null || ttsEngine != null || (AppState.get().ttsUseKokoro && KokoroEngine.get().isBusy());
     }
 
     public boolean isPlaying() {
@@ -516,6 +607,9 @@ public class TTSEngine {
             return mp != null && mp.isPlaying();
         }
 
+        if (AppState.get().ttsUseKokoro) {
+            return KokoroEngine.get().isBusy();
+        }
         synchronized (helpObject) {
             if (ttsEngine == null) {
                 return false;
@@ -525,6 +619,9 @@ public class TTSEngine {
     }
 
     public boolean hasNoEngines() {
+        if (AppState.get().ttsUseKokoro) {
+            return false;
+        }
         try {
             return ttsEngine != null && (ttsEngine.getEngines() == null || ttsEngine.getEngines()
                                                                                     .size() == 0);
@@ -562,6 +659,9 @@ public class TTSEngine {
     }
 
     public String getCurrentEngineName() {
+        if (AppState.get().ttsUseKokoro) {
+            return "Kokoro-82M (AI)";
+        }
         try {
             if (ttsEngine != null) {
                 String enginePackage = ttsEngine.getDefaultEngine();
@@ -692,6 +792,136 @@ public class TTSEngine {
             mp.seekTo(i);
         }
 
+    }
+
+    /**
+     * Offline AI voice (Kokoro-82M): same queue protocol as the system engine
+     * (STOP_SIGNAL / FINISHED_SIGNAL+i / UTTERANCE_ID_DONE).
+     */
+    private void kokoroSpeakLocked(final String text) {
+        this.text = text;
+        if (AppSP.get().tempBookPage != AppSP.get().lastBookPage) {
+            AppSP.get().tempBookPage = AppSP.get().lastBookPage;
+            AppSP.get().lastBookParagraph = 0;
+        }
+        LOG.d(TAG, "kokoro speek", AppSP.get().lastBookPage, "par", AppSP.get().lastBookParagraph);
+        if (TxtUtils.isEmpty(text)) {
+            return;
+        }
+        final KokoroEngine kok = KokoroEngine.get();
+        if (!kok.isReady()) {
+            kok.prepareAsync(new Runnable() {
+                @Override public void run() {
+                    if (AppState.get().ttsUseKokoro) {
+                        speek(text);
+                    }
+                }
+            });
+            return;
+        }
+        final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
+        float sp = AppState.get().ttsSpeed;
+        if (sp <= 0) {
+            sp = 0.01f;
+        }
+        final float speed = sp;
+        kok.stopInternal();
+        if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
+            String[] parts = text.split(TxtUtils.TTS_PAUSE);
+            kok.enqueueSilence(0, "Temp", sid, speed);
+            for (int i = AppSP.get().lastBookParagraph; i < parts.length; i++) {
+                String big = parts[i] == null ? "" : parts[i].trim();
+                if (TxtUtils.isNotEmpty(big)) {
+                    if (big.length() == 1 && !Character.isLetterOrDigit(big.charAt(0))) {
+                        LOG.d("Skip: " + big);
+                        continue;
+                    }
+                    if (big.contains(TxtUtils.TTS_SKIP)) {
+                        continue;
+                    }
+                    if (big.contains(TxtUtils.TTS_STOP)) {
+                        kok.enqueueSilence(AppState.get().ttsPauseDuration, STOP_SIGNAL, sid, speed);
+                        LOG.d("Add stop signal");
+                    }
+                    if (big.contains(TxtUtils.TTS_NEXT)) {
+                        kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
+                        LOG.d("next-page signal");
+                        break;
+                    }
+                    kok.enqueueSpeak(big, FINISHED_SIGNAL + i, sid, speed);
+                    kok.enqueueSilence(AppState.get().ttsPauseDuration, "Temp", sid, speed);
+                    LOG.d("kokoro pageHTML-parts", i);
+                }
+            }
+            kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
+        } else {
+            LOG.d("kokoro pageHTML-parts-single");
+            kok.enqueueSpeak(text.replace(TxtUtils.TTS_PAUSE, ""), UTTERANCE_ID_DONE, sid, speed);
+        }
+    }
+
+    /**
+     * Export pages to WAV/MP3 files with the offline AI voice.
+     */
+    private void speakToFileKokoro(final DocumentController controller, final String folder,
+                                   final ResultResponse<String> info, int from, int to) {
+        int page = from;
+        while (page < to && TempHolder.isRecordTTS) {
+            LOG.d("speakToFile-kokoro", page, controller.getPageCount());
+            info.onResultRecive((page + 1) + " / " + to);
+            DecimalFormat df = new DecimalFormat("0000");
+            String pageName = "page-" + df.format(page + 1);
+            final String wav = new File(folder, pageName + WAV).getPath();
+            String fileText = controller.getTextForPage(page);
+            controller.recyclePage(page);
+            if (TxtUtils.isEmpty(fileText)) {
+                page++;
+                continue;
+            }
+            if (fileText.length() > 3950) {
+                fileText = TxtUtils.substringSmart(fileText, 3950) + " "
+                        + controller.getString(R.string.text_is_too_long);
+            }
+            try {
+                KokoroEngine.get().prepareSync();
+                int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
+                float speed = AppState.get().ttsSpeed <= 0 ? 1.0f : AppState.get().ttsSpeed;
+                KokoroEngine.get().generateToWav(fileText, sid, speed, wav);
+            } catch (Throwable e) {
+                LOG.e(e);
+            }
+            if (AppState.get().isConvertToMp3) {
+                try {
+                    File file = new File(wav);
+                    Lame lame = new Lame();
+                    InputStream input = new BufferedInputStream(new FileInputStream(file));
+                    input.mark(44);
+                    int bitrate = MobiParserIS.asInt_LITTLE_ENDIAN(input, 24, 4);
+                    LOG.d("bitrate", bitrate);
+                    input.close();
+                    input = new FileInputStream(file);
+                    byte[] bytes = IOUtils.toByteArray(input);
+                    short[] shorts = new short[bytes.length / 2];
+                    ByteBuffer.wrap(bytes)
+                              .order(ByteOrder.LITTLE_ENDIAN)
+                              .asShortBuffer()
+                              .get(shorts);
+                    lame.open(1, bitrate, 128, 4);
+                    byte[] res = lame.encode(shorts, 44, shorts.length);
+                    lame.close();
+                    File toFile = new File(wav.replace(".wav", ".mp3"));
+                    toFile.delete();
+                    IO.copyFile(new ByteArrayInputStream(res), toFile);
+                    input.close();
+                    file.delete();
+                } catch (Exception e) {
+                    LOG.e(e);
+                }
+            }
+            page++;
+        }
+        info.onResultRecive(controller.getActivity().getString(R.string.success));
+        TempHolder.isRecordTTS = false;
     }
 
 }
