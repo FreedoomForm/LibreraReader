@@ -25,6 +25,7 @@ import com.foobnix.pdf.info.wrapper.DocumentController;
 import com.foobnix.pdf.info.wrapper.UITab;
 import com.foobnix.tts.TTSEngine;
 import com.foobnix.tts.TTSNotification;
+import com.foobnix.tts.TTSService;
 import com.foobnix.ui2.MainTabs2;
 
 import java.util.ArrayList;
@@ -145,14 +146,17 @@ public class CloseAppDialog {
 
             @Override
             public void onClick(DialogInterface dialog, int which) {
-                TTSNotification.hideNotification();
-                TTSEngine.get().shutdown();
                 int i = 0;
                 if (which == i++) {
-
+                    // Close book: stop TTS
+                    TTSNotification.hideNotification();
+                    TTSEngine.get().shutdown();
                     c.onCloseActivityAdnShowInterstial();
 
                 } else if (which == i++) {
+                    // Go to library: stop TTS
+                    TTSNotification.hideNotification();
+                    TTSEngine.get().shutdown();
                     c.onCloseActivityFinal(new Runnable() {
 
                         @Override
@@ -161,9 +165,14 @@ public class CloseAppDialog {
                         }
                     });
                 } else if (which == i++) {
+                    // Hide app: KEEP TTS reading alive in background
+                    TTSService.startKeepAlive();
                     Apps.showDesctop(a);
 
                 } else if (which == i++) {
+                    // Exit application: stop TTS
+                    TTSNotification.hideNotification();
+                    TTSEngine.get().shutdown();
                     c.onCloseActivityFinal(new Runnable() {
 
                         @Override

@@ -2605,6 +2605,14 @@ public class HorizontalViewActivity extends AdsFragmentActivity {
             return;
         }
 
+        // Keep TTS reading alive when leaving the screen with the back key
+        if (TTSEngine.get().isPlaying() || TTSEngine.get().isTempPausing()) {
+            TTSService.startKeepAlive();
+            Toast.makeText(this, R.string.tts_continues_in_background, Toast.LENGTH_SHORT).show();
+            Apps.showDesctop(this);
+            return;
+        }
+
         if (AppState.get().isShowLongBackDialog) {
             CloseAppDialog.showOnLongClickDialog(HorizontalViewActivity.this, null, dc);
         } else {

@@ -83,6 +83,9 @@ import java.util.List;
     public static final String EXTRA_INT = "INT";
     private static final String TAG = "TTSService";
     public static String ACTION_PLAY_CURRENT_PAGE = "ACTION_PLAY_CURRENT_PAGE";
+    public static final String ACTION_KEEP_ALIVE = "ACTION_KEEP_ALIVE";
+    public static final String EXTRA_W = "EXTRA_W";
+    public static final String EXTRA_H = "EXTRA_H";
     private final BroadcastReceiver blueToothReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             LOG.d("blueToothReceiver", intent);
@@ -338,6 +341,31 @@ import java.util.List;
             } else {
                 LibreraApp.context.startService(intent);
             }
+        } catch (Exception e) {
+            LOG.e(e);
+        }
+    }
+
+    /**
+     * Promotes the app to a foreground service WITHOUT touching current playback.
+     * Called when the user leaves the reading screen while TTS is playing
+     * (back key / hide app): reading continues in the background and the
+     * notification keeps play/pause/stop controls alive.
+     */
+    public static void startKeepAlive() {
+        try {
+            if (!TTSEngine.get().isPlaying() && !TTSEngine.get().isTempPausing()) {
+                LOG.d(TAG, "keep-alive skipped: TTS is not playing");
+                return;
+            }
+            Intent intent = new Intent(LibreraApp.context, TTSService.class);
+            intent.setAction(ACTION_KEEP_ALIVE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                LibreraApp.context.startForegroundService(intent);
+            } else {
+                LibreraApp.context.startService(intent);
+            }
+            TTSNotification.showLast();
         } catch (Exception e) {
             LOG.e(e);
         }
@@ -703,6 +731,13 @@ import java.util.List;
             return START_STICKY;
         }
 
+        if (ACTION_KEEP_ALIVE.equals(intent.getAction())) {
+            LOG.d(TAG, "keep-alive: TTS continues in background");
+            TTSNotification.showLast();
+            EventBus.getDefault().post(new TtsStatus());
+            return START_STICKY;
+        }
+
         updateTimer();
         MediaButtonReceiver.handleIntent(mMediaSessionCompat, intent);
 
@@ -810,6 +845,11 @@ import java.util.List;
             int pageNumber = intent.getIntExtra(EXTRA_INT, -1);
             AppSP.get().lastBookPath = intent.getStringExtra(EXTRA_PATH);
             String anchor = intent.getStringExtra(EXTRA_ANCHOR);
+            int extraW = intent.getIntExtra(EXTRA_W, -1);
+            if (extraW > 0) {
+                AppSP.get().lastBookWidth = extraW;
+                AppSP.get().lastBookHeight = intent.getIntExtra(EXTRA_H, 2400);
+            }
 
             if (pageNumber != -1) {
                 playPage("", pageNumber, anchor);
