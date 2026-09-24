@@ -3,6 +3,7 @@ package com.foobnix;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import com.foobnix.model.AppSP;
 import com.foobnix.model.AppProfile;
+import com.foobnix.ai.KokoroEngine;
 import com.foobnix.model.AppState;
 
 import android.app.Application;
@@ -96,6 +97,17 @@ public class LibreraApp extends Application {
                     AppState.get().save(this);
                     LOG.d("LibreraApp", "migration: offline AI voice (Kokoro) enabled by default");
                 }
+            }
+        } catch (Throwable t) {
+            LOG.e(t);
+        }
+
+        try {
+            // Warm up the offline AI voice in the background so that pressing
+            // Play starts speaking immediately instead of waiting seconds for
+            // the Kokoro model to initialize on the first playback.
+            if (AppState.get().ttsUseKokoro) {
+                KokoroEngine.get().prepareAsync(null, true);
             }
         } catch (Throwable t) {
             LOG.e(t);

@@ -72,6 +72,13 @@ public class KokoroEngine {
     }
 
     public void prepareAsync(final Runnable onReady) {
+        prepareAsync(onReady, false);
+    }
+
+    /**
+     * @param silent true to suppress the "initializing" toast (background warm-up)
+     */
+    public void prepareAsync(final Runnable onReady, boolean silent) {
         if (isReady()) {
             if (onReady != null) {
                 onReady.run();
@@ -85,7 +92,9 @@ public class KokoroEngine {
             return;
         }
         preparing = true;
-        toast(R.string.tts_kokoro_init);
+        if (!silent) {
+            toast(R.string.tts_kokoro_init);
+        }
         exec.execute(new Runnable() {
             public void run() {
                 try {

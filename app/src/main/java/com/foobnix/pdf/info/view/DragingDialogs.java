@@ -877,6 +877,10 @@ public class DragingDialogs {
                 TxtUtils.underlineTextView(ttsKokoroToggle);
                 TxtUtils.underlineTextView(ttsKokoroVoice);
                 if (AppState.get().ttsUseKokoro) {
+                    // start loading the AI model now so Play/preview is instant
+                    KokoroEngine.get().prepareAsync(null, true);
+                }
+                if (AppState.get().ttsUseKokoro) {
                     textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 }
                 ttsKokoroToggle.setOnClickListener(new OnClickListener() {

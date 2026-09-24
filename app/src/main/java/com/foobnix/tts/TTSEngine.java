@@ -296,7 +296,13 @@ public class TTSEngine {
         LOG.d(TAG, "stop");
         TxtUtils.dictHash = "";
         try {
-            KokoroEngine.get().release();
+            if (AppState.get().ttsUseKokoro) {
+                // keep the AI model warm in memory: the next Play must start
+                // instantly instead of re-initializing the engine for seconds
+                KokoroEngine.get().stopInternal();
+            } else {
+                KokoroEngine.get().release();
+            }
         } catch (Exception e) {
             LOG.e(e);
         }
@@ -390,6 +396,13 @@ public class TTSEngine {
         if (TxtUtils.isEmpty(text)) {
             return;
         }
+        if (AppState.get().ttsUseKokoro) {
+            // Offline AI voice: do not bind the system TextToSpeech here at
+            // all - its init callback sleeps 1s on the main thread and the
+            // engine itself is never used for playback.
+            kokoroSpeakLocked(text);
+            return;
+        }
         if (ttsEngine == null) {
             LOG.d("getTTS-status was null");
         } else {
@@ -409,11 +422,6 @@ public class TTSEngine {
                 }
             }
         });
-
-        if (AppState.get().ttsUseKokoro) {
-            kokoroSpeakLocked(text);
-            return;
-        }
 
         if (ttsEngine == null) {
             LOG.d(TAG, "speek: no TTS engine available");
