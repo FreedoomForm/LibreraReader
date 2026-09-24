@@ -49,6 +49,7 @@ public class KokoroEngine {
         long silenceMs;
         int sid;
         float speed;
+        long gen;
     }
 
     private volatile OfflineTts tts;
@@ -58,6 +59,8 @@ public class KokoroEngine {
     private volatile boolean aborted = false;
     private volatile boolean generating = false;
     private volatile AudioTrack track;
+    /** bumped by every stop(); items from an older generation are stale */
+    private volatile long generation = 0;
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     private final java.util.List<Runnable> pendingOnReady = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
@@ -98,6 +101,7 @@ public class KokoroEngine {
         exec.execute(new Runnable() {
             public void run() {
                 try {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
                     prepareInternal();
                     for (Runnable r : pendingOnReady) {
                         try {
@@ -111,6 +115,7 @@ public class KokoroEngine {
                     ready = false;
                     toastSafe("AI TTS init failed: " + e.getClass().getSimpleName());
                 } finally {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                     pendingOnReady.clear();
                     preparing = false;
                 }
@@ -172,6 +177,7 @@ public class KokoroEngine {
     }
 
     public void stopInternal() {
+        generation++;
         aborted = true;
         queue.clear();
         AudioTrack t = track;
@@ -212,7 +218,7 @@ public class KokoroEngine {
     }
 
     private void enqueue(Item it) {
-        aborted = false;
+        it.gen = generation;
         queue.add(it);
         ensureWorker();
     }
@@ -243,8 +249,10 @@ public class KokoroEngine {
         exec.execute(new Runnable() {
             public void run() {
                 try {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
                     drain();
                 } finally {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                     workerRunning = false;
                 }
             }
@@ -268,14 +276,13 @@ public class KokoroEngine {
     private void runItem(final Item it) {
         try {
             OfflineTts t = tts;
-            if (t == null || aborted) {
-                if (!aborted) {
-                    TTSEngine.get().fireKokoroError(it.utteranceId);
-                }
-                return;
+            if (t == null || it.gen != generation) {
+                return; // stale item dropped after stop()
             }
             if (it.isSpeak) {
                 generating = true;
+                aborted = false;
+                final long myGen = it.gen;
                 AudioTrack at = buildTrack(t.getSampleRate());
                 track = at;
                 try {
@@ -287,7 +294,7 @@ public class KokoroEngine {
                     final AudioTrack fAt = at;
                     t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
                         public Integer invoke(float[] samples) {
-                            if (aborted || fAt == null) {
+                            if (aborted || myGen != generation || fAt == null) {
                                 return 0;
                             }
                             try {
@@ -305,23 +312,24 @@ public class KokoroEngine {
                 try { at.release(); } catch (Throwable e) { }
                 track = null;
                 generating = false;
-                if (!aborted) {
+                if (!aborted && myGen == generation) {
                     TTSEngine.get().fireKokoroDone(it.utteranceId);
                 }
             } else {
+                aborted = false;
                 long left = it.silenceMs;
-                while (left > 0 && !aborted) {
+                while (left > 0 && !aborted && it.gen == generation) {
                     long step = Math.min(50, left);
                     Thread.sleep(step);
                     left -= step;
                 }
-                if (!aborted) {
+                if (!aborted && it.gen == generation) {
                     TTSEngine.get().fireKokoroDone(it.utteranceId);
                 }
             }
         } catch (Throwable e) {
             LOG.e(e);
-            if (!aborted) {
+            if (!aborted && it.gen == generation) {
                 TTSEngine.get().fireKokoroError(it.utteranceId);
             }
         } finally {

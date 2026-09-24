@@ -1063,25 +1063,31 @@ public class DragingDialogs {
                 ttsPage.setVisibility(View.GONE);
                 timerStart.setVisibility(View.GONE);
 
-                TTSEngine.get().getTTS(new OnInitListener() {
-                    @Override public void onInit(int status) {
-                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
-                        ttsLang.setText(TTSEngine.get().getCurrentLang());
-                        TxtUtils.bold(ttsLang);
-                    }
-                });
+                if (!AppState.get().ttsUseKokoro) {
+                    // System voice: bind the system TextToSpeech to show its
+                    // engine/language. With the offline AI voice we skip it
+                    // completely - binding janks the UI thread for nothing,
+                    // the active AI voice is already shown above.
+                    TTSEngine.get().getTTS(new OnInitListener() {
+                        @Override public void onInit(int status) {
+                            textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                            ttsLang.setText(TTSEngine.get().getCurrentLang());
+                            TxtUtils.bold(ttsLang);
+                        }
+                    });
 
-                controller.runTimer(1000, new Runnable() {
-                    @Override public void run() {
-                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
-                        ttsLang.setText(TTSEngine.get().getCurrentLang());
-                        TxtUtils.bold(ttsLang);
-                    }
-                });
+                    controller.runTimer(1000, new Runnable() {
+                        @Override public void run() {
+                            textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                            ttsLang.setText(TTSEngine.get().getCurrentLang());
+                            TxtUtils.bold(ttsLang);
+                        }
+                    });
 
-                textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
-                ttsLang.setText(TTSEngine.get().getCurrentLang());
-                TxtUtils.bold(ttsLang);
+                    textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                    ttsLang.setText(TTSEngine.get().getCurrentLang());
+                    TxtUtils.bold(ttsLang);
+                }
 
                 View ttsSettings = view.findViewById(R.id.ttsSettings);
                 textEngine.setOnClickListener(new OnClickListener() {
