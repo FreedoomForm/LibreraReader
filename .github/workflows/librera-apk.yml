@@ -198,10 +198,7 @@ jobs:
           if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-Kokoro-x86_64.apk; fi
           ARM=$(find app/build/outputs/apk -name "*.apk" | grep -i -- "-arm\." | head -1)
           if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-AI-Kokoro-arm32.apk; fi
-          mkdir -p dist/release
-          cp dist/Librera-AI-Kokoro.apk dist/release/
-          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then cp dist/Librera-AI-Kokoro-arm32.apk dist/release/; fi
-          ls -la dist dist/release
+          ls -la dist
 
       - name: Verify installability (apksigner signature + 16KB alignment)
         run: |
@@ -321,6 +318,15 @@ jobs:
                   except Exception as e:
                       print('delete failed:', a['name'], e)
           PY
+
+      - name: Prepare release folder (only user-facing APKs)
+        run: |
+          mkdir -p dist/release
+          cp dist/Librera-AI-Kokoro.apk dist/release/
+          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then
+            cp dist/Librera-AI-Kokoro-arm32.apk dist/release/
+          fi
+          ls -la dist/release
 
       - name: Generate SHA256SUMS (published files only)
         run: |
