@@ -287,7 +287,7 @@ jobs:
   emulator-test-arm64:
     runs-on: ubuntu-24.04-arm
     needs: build
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout (test script)
         uses: actions/checkout@v4
@@ -304,17 +304,20 @@ jobs:
           name: librera-apks
           path: dist
 
-      - name: Enable KVM access (fix TCG software-emulation fallback)
+      - name: KVM access (best-effort; arm runners may lack KVM => TCG fallback)
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules || true
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
           sudo chmod 666 /dev/kvm || true
-          ls -l /dev/kvm
+          (ls -l /dev/kvm || echo "no KVM on this runner - emulator will use TCG software emulation (slow)")
 
       - name: Run app on emulator (Android 14 / api 34, arm64 - what real phones run)
         env:
           TEST_APK: dist/Librera-AI-Kokoro.apk
+          TTS_SLEEP: "600"
+          RU_SLEEP: "600"
+          STRICT_RU: "0"
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34

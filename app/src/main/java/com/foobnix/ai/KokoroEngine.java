@@ -273,6 +273,19 @@ public class KokoroEngine {
         });
     }
 
+    /** Tunable kill-switch limits via adb shell setprop (emulators/CI only). */
+    private static long propLimit(String key, long defMs) {
+        try {
+            Class<?> c = Class.forName("android.os.SystemProperties");
+            String v = (String) c.getMethod("get", String.class).invoke(null, key);
+            if (v != null && !v.trim().isEmpty()) {
+                return Long.parseLong(v.trim());
+            }
+        } catch (Throwable t) {
+        }
+        return defMs;
+    }
+
     private void drain() {
         while (true) {
             Item it = queue.poll();
@@ -352,8 +365,11 @@ public class KokoroEngine {
                 } catch (Throwable e) {
                 }
                 genThread.start();
-                // Kill-switches: no FIRST audio within 60s, or the stream stalled
-                // for 30s. A healthy stream is never abandoned - only a hung one.
+                // Kill-switches: no FIRST audio (default 60s) or a stalled stream
+                // (default 30s). A healthy stream is never abandoned - only a hung
+                // one. Slow emulators (TCG) can raise both via adb shell setprop.
+                long firstMs = propLimit("kokoro.first_audio_ms", 60000);
+                long stallMs = propLimit("kokoro.stall_ms", 30000);
                 long lastCount = -1L;
                 long lastProgress = genStart;
                 while (!genDone.get() && !aborted && myGen == generation) {
@@ -362,12 +378,12 @@ public class KokoroEngine {
                         lastProgress = android.os.SystemClock.elapsedRealtime();
                     }
                     long stalledMs = android.os.SystemClock.elapsedRealtime() - lastProgress;
-                    if (!gotAudio.get() && stalledMs > 60000) {
+                    if (!gotAudio.get() && stalledMs > firstMs) {
                         LOG.e(new IllegalStateException("kokoro timeout: no audio within 60s"));
                         TTSEngine.get().onKokoroFailure();
                         break;
                     }
-                    if (gotAudio.get() && stalledMs > 30000) {
+                    if (gotAudio.get() && stalledMs > stallMs) {
                         LOG.e(new IllegalStateException("kokoro timeout: audio stream stalled"));
                         TTSEngine.get().onKokoroFailure();
                         break;
