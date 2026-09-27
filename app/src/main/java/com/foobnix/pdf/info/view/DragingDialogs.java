@@ -902,12 +902,19 @@ public class DragingDialogs {
                         b.setSingleChoiceItems(items, checked, new android.content.DialogInterface.OnClickListener() {
                             @Override public void onClick(android.content.DialogInterface dialog, int which) {
                                 AppState.get().ttsKokoroVoice = KokoroVoices.CODES[which];
+                                // Picking a Kokoro voice is an explicit request for the AI
+                                // engine. If the ON/OFF toggle was left OFF (easy to tap by
+                                // accident), the selection silently had no effect: preview
+                                // stayed silent and reading kept using the system TTS voice.
+                                // Auto-enable so a chosen AI voice always plays as AI.
+                                if (!AppState.get().ttsUseKokoro) {
+                                    AppState.get().ttsUseKokoro = true;
+                                    ttsKokoroToggle.setText(R.string.tts_kokoro_on);
+                                }
                                 AppState.get().save(activity);
                                 ttsKokoroVoice.setText(KokoroVoices.DISPLAY[which]);
-                                if (AppState.get().ttsUseKokoro) {
-                                    textEngine.setText(KokoroVoices.DISPLAY[which]);
-                                    KokoroEngine.get().preview(which);
-                                }
+                                textEngine.setText(KokoroVoices.DISPLAY[which]);
+                                KokoroEngine.get().preview(which);
                                 dialog.dismiss();
                             }
                         });
