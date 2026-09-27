@@ -885,6 +885,10 @@ public class DragingDialogs {
                 }
                 ttsKokoroToggle.setOnClickListener(new OnClickListener() {
                     @Override public void onClick(View v) {
+                        if (!AppState.get().ttsUseKokoro) {
+                            // the user turns the AI voice back ON - clear the failure fallback
+                            TTSEngine.kokoroFallbackActive = false;
+                        }
                         AppState.get().ttsUseKokoro = !AppState.get().ttsUseKokoro;
                         AppState.get().save(v.getContext());
                         ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on : R.string.tts_kokoro_off);
@@ -911,6 +915,7 @@ public class DragingDialogs {
                                     AppState.get().ttsUseKokoro = true;
                                     ttsKokoroToggle.setText(R.string.tts_kokoro_on);
                                 }
+                                TTSEngine.kokoroFallbackActive = false;
                                 AppState.get().save(activity);
                                 ttsKokoroVoice.setText(KokoroVoices.DISPLAY[which]);
                                 textEngine.setText(KokoroVoices.DISPLAY[which]);

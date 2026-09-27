@@ -267,15 +267,20 @@ public class TTSEngine {
         }
 
         LOG.d(TAG, "stop");
+        kokoroPlaySeq.incrementAndGet();
         if (AppState.get().ttsUseKokoro) {
             try {
                 KokoroEngine.get().stopInternal();
             } catch (Exception e) {
                 LOG.e(e);
             }
-            EventBus.getDefault()
-                    .post(new TtsStatus());
-            return;
+            if (!kokoroFallbackActive) {
+                EventBus.getDefault()
+                        .post(new TtsStatus());
+                return;
+            }
+            // fallback mode: the system engine is the one actually playing,
+            // so fall through and stop it as well
         }
         synchronized (helpObject) {
 
@@ -295,6 +300,7 @@ public class TTSEngine {
     public void stopDestroy() {
         LOG.d(TAG, "stop");
         TxtUtils.dictHash = "";
+        kokoroPlaySeq.incrementAndGet();
         try {
             if (AppState.get().ttsUseKokoro) {
                 // keep the AI model warm in memory: the next Play must start
@@ -343,6 +349,17 @@ public class TTSEngine {
         }
     }
 
+    /**
+     * Session-scoped kill switch: when the AI engine fails to produce audio
+     * (prepare failed/OOM, JNI hang, zero output) the reading continues with
+     * the system TTS instead of leaving the user in silence. Cleared when the
+     * user explicitly re-enables Kokoro in the voice dialog.
+     */
+    public static volatile boolean kokoroFallbackActive = false;
+    /** bumped on every kokoro play press and on stop() - invalidates stale fallback timers */
+    private static final java.util.concurrent.atomic.AtomicLong kokoroPlaySeq =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
     public void fireKokoroDone(String utteranceId) {
         try {
             if (kokoroProgressListener != null) {
@@ -377,6 +394,24 @@ public class TTSEngine {
         }
     }
 
+    /**
+     * The AI engine failed to deliver audio: toast once and let this play
+     * press finish with the system TTS voice - never leave the user silent.
+     */
+    public void onKokoroFailure() {
+        if (kokoroFallbackActive) {
+            return;
+        }
+        kokoroFallbackActive = true;
+        LOG.e(new IllegalStateException("kokoro failure: system TTS fallback for this session"));
+        try {
+            Toast.makeText(LibreraApp.context, R.string.tts_kokoro_fallback, Toast.LENGTH_LONG)
+                 .show();
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
+
     @TargetApi(Build.VERSION_CODES.LOLLIPOP) public void speek(final String text) {
         synchronized (helpObject) {
             speekLocked(text);
@@ -396,7 +431,7 @@ public class TTSEngine {
         if (TxtUtils.isEmpty(text)) {
             return;
         }
-        if (AppState.get().ttsUseKokoro) {
+        if (AppState.get().ttsUseKokoro && !kokoroFallbackActive) {
             // Offline AI voice: do not bind the system TextToSpeech here at
             // all - its init callback sleeps 1s on the main thread and the
             // engine itself is never used for playback.
@@ -613,7 +648,7 @@ public class TTSEngine {
             return mp != null && mp.isPlaying();
         }
 
-        if (AppState.get().ttsUseKokoro) {
+        if (AppState.get().ttsUseKokoro && !kokoroFallbackActive) {
             return KokoroEngine.get().isBusy();
         }
         synchronized (helpObject) {
@@ -805,6 +840,7 @@ public class TTSEngine {
      * (STOP_SIGNAL / FINISHED_SIGNAL+i / UTTERANCE_ID_DONE).
      */
     private void kokoroSpeakLocked(final String text) {
+        final long mySeq = kokoroPlaySeq.incrementAndGet();
         this.text = text;
         if (AppSP.get().tempBookPage != AppSP.get().lastBookPage) {
             AppSP.get().tempBookPage = AppSP.get().lastBookPage;
@@ -816,13 +852,32 @@ public class TTSEngine {
         }
         final KokoroEngine kok = KokoroEngine.get();
         if (!kok.isReady()) {
+            final java.util.concurrent.atomic.AtomicBoolean started =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
             kok.prepareAsync(new Runnable() {
                 @Override public void run() {
-                    if (AppState.get().ttsUseKokoro) {
+                    started.set(true);
+                    if (AppState.get().ttsUseKokoro && !kokoroFallbackActive) {
                         speek(text);
                     }
                 }
             });
+            // Never leave the user in silence: if the AI engine is still not
+            // ready 2 minutes after Play (prepare failed, OOM, stuck init),
+            // finish this play press with the system voice.
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (mySeq != kokoroPlaySeq.get() || started.get()
+                            || !AppState.get().ttsUseKokoro || kokoroFallbackActive
+                            || KokoroEngine.get().isReady()) {
+                        return;
+                    }
+                    LOG.e(new IllegalStateException(
+                            "kokoro prepare not finished 120s after Play - system TTS fallback"));
+                    onKokoroFailure();
+                    speek(text);
+                }
+            }, 120000);
             return;
         }
         final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);

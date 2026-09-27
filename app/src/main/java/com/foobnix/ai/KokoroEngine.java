@@ -55,7 +55,8 @@ public class KokoroEngine {
     private volatile OfflineTts tts;
     private volatile boolean ready = false;
     private volatile boolean preparing = false;
-    private volatile boolean workerRunning = false;
+    private final java.util.concurrent.atomic.AtomicInteger workerScheduled =
+            new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile boolean aborted = false;
     private volatile boolean generating = false;
     private volatile AudioTrack track;
@@ -246,11 +247,15 @@ public class KokoroEngine {
         audio.save(path);
     }
 
+    /**
+     * Schedules a drain pass on the single executor. CAS-based so an item
+     * enqueued between the worker's last poll() and its exit can never be
+     * left in the queue forever (lost-wakeup race = endless silence).
+     */
     private synchronized void ensureWorker() {
-        if (workerRunning) {
+        if (!workerScheduled.compareAndSet(0, 1)) {
             return;
         }
-        workerRunning = true;
         exec.execute(new Runnable() {
             public void run() {
                 try {
@@ -258,7 +263,11 @@ public class KokoroEngine {
                     drain();
                 } finally {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
-                    workerRunning = false;
+                    workerScheduled.set(0);
+                    // re-arm if items arrived while we were exiting
+                    if (!queue.isEmpty()) {
+                        ensureWorker();
+                    }
                 }
             }
         });
@@ -288,33 +297,61 @@ public class KokoroEngine {
                 generating = true;
                 aborted = false;
                 final long myGen = it.gen;
-                AudioTrack at = buildTrack(t.getSampleRate());
-                track = at;
+                final AudioTrack fAt = buildTrack(t.getSampleRate());
+                track = fAt;
+                boolean canPlay = true;
                 try {
-                    at.play();
+                    fAt.play();
                 } catch (Throwable e) {
+                    // without a playing track every write() below would fail and
+                    // abort the generation instantly - report an error instead of
+                    // a silent "done" that flips pages with no sound at all
                     LOG.e(e);
+                    canPlay = false;
                 }
+                final boolean playOk = canPlay;
                 final long[] pcm = new long[1];
+                final java.util.concurrent.atomic.AtomicBoolean gotAudio =
+                        new java.util.concurrent.atomic.AtomicBoolean(false);
                 final long genStart = android.os.SystemClock.elapsedRealtime();
-                try {
-                    final AudioTrack fAt = at;
-                    t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
-                        public Integer invoke(float[] samples) {
-                            if (aborted || myGen != generation || fAt == null) {
-                                return 0;
-                            }
-                            try {
-                                fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
-                                pcm[0] += samples.length;
-                            } catch (Throwable e) {
-                                return 0;
-                            }
-                            return 1;
+                final Handler main = new Handler(Looper.getMainLooper());
+                // watchdog: if the native synthesis produces nothing (JNI hang,
+                // stuck espeak on exotic text, dead audio output) the reader
+                // would stay silent forever - abort it and switch to fallback
+                final Runnable watchdog = new Runnable() {
+                    public void run() {
+                        if (!gotAudio.get() && !aborted && myGen == generation && generating) {
+                            LOG.e(new IllegalStateException("kokoro watchdog: no audio within 60s"));
+                            TTSEngine.get().onKokoroFailure();
+                            stopInternal();
+                            generating = false;
+                            TTSEngine.get().fireKokoroError(it.utteranceId);
                         }
-                    });
+                    }
+                };
+                main.postDelayed(watchdog, 60000);
+                try {
+                    if (playOk) {
+                        t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
+                            public Integer invoke(float[] samples) {
+                                if (aborted || myGen != generation || fAt == null) {
+                                    return 0;
+                                }
+                                try {
+                                    fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
+                                    pcm[0] += samples.length;
+                                    gotAudio.set(true);
+                                } catch (Throwable e) {
+                                    return 0;
+                                }
+                                return 1;
+                            }
+                        });
+                    }
                 } catch (Throwable e) {
                     LOG.e(e);
+                } finally {
+                    main.removeCallbacks(watchdog);
                 }
                 if (pcm[0] > 0) {
                     float audioSec = pcm[0] / (float) t.getSampleRate();
@@ -324,12 +361,19 @@ public class KokoroEngine {
                             String.format("%.1f", audioSec), "s audio, RTF",
                             String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
-                try { at.stop(); } catch (Throwable e) { }
-                try { at.release(); } catch (Throwable e) { }
+                try { fAt.stop(); } catch (Throwable e) { }
+                try { fAt.release(); } catch (Throwable e) { }
                 track = null;
                 generating = false;
                 if (!aborted && myGen == generation) {
-                    TTSEngine.get().fireKokoroDone(it.utteranceId);
+                    if (pcm[0] > 0) {
+                        TTSEngine.get().fireKokoroDone(it.utteranceId);
+                    } else {
+                        // zero samples = something failed silently - report an
+                        // error so the session stops instead of paging silently
+                        LOG.e(new IllegalStateException("kokoro item produced 0 samples"));
+                        TTSEngine.get().fireKokoroError(it.utteranceId);
+                    }
                 }
             } else {
                 aborted = false;
