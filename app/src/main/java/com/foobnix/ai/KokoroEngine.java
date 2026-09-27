@@ -325,11 +325,13 @@ public class KokoroEngine {
                 // would add a hardware open/close gap to every single word. The
                 // track is drained (stop) after each item so the playback lag
                 // never exceeds one word, and released when the queue empties.
-                AudioTrack fAt = track;
-                if (fAt == null) {
-                    fAt = buildTrack(t.getSampleRate());
-                    track = fAt;
+                AudioTrack tmp = track;
+                if (tmp == null) {
+                    tmp = buildTrack(t.getSampleRate());
+                    track = tmp;
                 }
+                // effectively-final alias: fAt is captured by the audio callback
+                final AudioTrack fAt = tmp;
                 boolean canPlay = true;
                 try {
                     if (fAt.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
