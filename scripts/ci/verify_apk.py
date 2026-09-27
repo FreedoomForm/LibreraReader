@@ -26,6 +26,9 @@ assert so, 'libsherpa-onnx-jni.so missing for arm64-v8a'
 tmp = tempfile.mkdtemp()
 sp = os.path.join(tmp, 'libsherpa-onnx-jni.so')
 open(sp, 'wb').write(z.read(so[0]))
+sz = os.path.getsize(sp)
+print('arm64 libsherpa-onnx-jni.so size: %.1f MB' % (sz / 1e6))
+assert sz > 10000000, 'arm64 sherpa must be the STATIC build (>=10MB, no separate onnxruntime); got %d bytes' % sz
 syms = subprocess.check_output(['nm', '-D', sp]).decode('utf-8', 'ignore')
 
 declared = set()

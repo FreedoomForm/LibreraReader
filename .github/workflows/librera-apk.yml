@@ -287,6 +287,7 @@ jobs:
   emulator-test-arm64:
     runs-on: ubuntu-24.04-arm
     needs: build
+    continue-on-error: true # no official Android emulator package for Linux ARM64 hosts yet
     timeout-minutes: 90
     steps:
       - name: Checkout (test script)
@@ -344,7 +345,7 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build, emulator-test, emulator-test-arm64]
+    needs: [build, emulator-test]
     steps:
       - name: Download APKs
         uses: actions/download-artifact@v4
