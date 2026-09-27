@@ -151,9 +151,14 @@ public class KokoroEngine {
                         + new File(dir, "lexicon-gb-en.txt").getAbsolutePath() + ","
                         + new File(dir, "lexicon-zh.txt").getAbsolutePath())
                 .build();
+        // synthesis is the heavy part: use as many cores as we can spare while
+        // keeping the rest for the UI (2 threads on a 4-core phone, 4 on 8-core+)
+        int cores = Runtime.getRuntime().availableProcessors();
+        int onnxThreads = Math.max(2, Math.min(4, cores / 2));
+        LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
         OfflineTtsModelConfig m = OfflineTtsModelConfig.builder()
                 .setKokoro(k)
-                .setNumThreads(2)
+                .setNumThreads(onnxThreads)
                 .setDebug(false)
                 .build();
         OfflineTtsConfig c = OfflineTtsConfig.builder()
@@ -290,6 +295,8 @@ public class KokoroEngine {
                 } catch (Throwable e) {
                     LOG.e(e);
                 }
+                final long[] pcm = new long[1];
+                final long genStart = android.os.SystemClock.elapsedRealtime();
                 try {
                     final AudioTrack fAt = at;
                     t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
@@ -299,6 +306,7 @@ public class KokoroEngine {
                             }
                             try {
                                 fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
+                                pcm[0] += samples.length;
                             } catch (Throwable e) {
                                 return 0;
                             }
@@ -307,6 +315,14 @@ public class KokoroEngine {
                     });
                 } catch (Throwable e) {
                     LOG.e(e);
+                }
+                if (pcm[0] > 0) {
+                    float audioSec = pcm[0] / (float) t.getSampleRate();
+                    float genSec = (android.os.SystemClock.elapsedRealtime() - genStart) / 1000f;
+                    // RTF < 1 means synthesis outpaces playback (no stutter)
+                    LOG.d(TAG, "kokoro gen", String.format("%.1f", genSec), "s for",
+                            String.format("%.1f", audioSec), "s audio, RTF",
+                            String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
                 try { at.stop(); } catch (Throwable e) { }
                 try { at.release(); } catch (Throwable e) { }
@@ -343,7 +359,9 @@ public class KokoroEngine {
         if (minBuf <= 0) {
             minBuf = 16384;
         }
-        int buf = Math.max(minBuf, sampleRate * 4);
+        // float PCM is 4 bytes per frame: keep 4 SECONDS of audio buffered
+        // (sampleRate*4 bytes is only 1s — it underruns on slow devices)
+        int buf = Math.max(minBuf, sampleRate * 4 * 4);
         return new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
