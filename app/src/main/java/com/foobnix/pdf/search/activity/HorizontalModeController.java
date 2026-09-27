@@ -522,6 +522,57 @@ public abstract class HorizontalModeController extends DocumentController {
                 .post(new InvalidateMessage());
     }
 
+    /**
+     * Word-by-word TTS reading: reuse the search-highlight mechanism
+     * (PageImageState selected words) to mark the word being spoken.
+     */
+    @Override public void highlightTTSWord(final int page, final int wordIndex) {
+        try {
+            if (wordIndex < 0) {
+                PageImageState.get()
+                              .putWords(page, null);
+                EventBus.getDefault()
+                        .post(new InvalidateMessage());
+                return;
+            }
+            final TextWord[][] texts = getPageText(page);
+            if (texts == null) {
+                return;
+            }
+            TextWord found = null;
+            int k = 0;
+            for (final TextWord[] line : texts) {
+                if (line == null) {
+                    continue;
+                }
+                for (final TextWord w : line) {
+                    if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                        continue;
+                    }
+                    if (k == wordIndex) {
+                        found = w;
+                        break;
+                    }
+                    k++;
+                }
+                if (found != null) {
+                    break;
+                }
+            }
+            if (found == null) {
+                return;
+            }
+            final List<TextWord> one = new ArrayList<TextWord>();
+            one.add(found);
+            PageImageState.get()
+                          .putWords(page, one);
+            EventBus.getDefault()
+                    .post(new InvalidateMessage());
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
+
     @Override public void saveChanges(List<PointF> points, int color) {
         throw new RuntimeException("Not Implemented");
 

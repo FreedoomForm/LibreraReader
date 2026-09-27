@@ -58,6 +58,8 @@ public class TTSEngine {
 
     public static final String FINISHED_SIGNAL = "Finished";
     public static final String STOP_SIGNAL = "Stoped";
+    /** utterance prefix for word-by-word items: "ttsW" + flat word index (or -1) */
+    public static final String WORD_SIGNAL = "ttsW";
     public static final String UTTERANCE_ID_DONE = "LirbiReader";
     public static final String WAV = ".wav";
     public static final String MP3 = ".mp3";
@@ -359,6 +361,72 @@ public class TTSEngine {
     /** bumped on every kokoro play press and on stop() - invalidates stale fallback timers */
     private static final java.util.concurrent.atomic.AtomicLong kokoroPlaySeq =
             new java.util.concurrent.atomic.AtomicLong(0);
+
+    /**
+     * Word boxes of the page currently being read (flat, reading order) plus
+     * the number of leading tokens carried over from the previous page
+     * (preText) - used to highlight the word being spoken in the book.
+     */
+    private volatile java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> ttsSourceWords;
+    private volatile int ttsSourceOffset = 0;
+
+    public void setTTSSourceWords(final java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> words,
+                                  final int preTextTokens) {
+        this.ttsSourceWords = words;
+        this.ttsSourceOffset = Math.max(0, preTextTokens);
+    }
+
+    /**
+     * Finds the page word matching the spoken token starting at {@code ptr}.
+     * Tolerant matching (punctuation/case stripped, hyphenated line breaks
+     * joined by MuPdf on one side only). Returns -1 when nothing matches.
+     */
+    private int matchSourceWord(final String token, final int ptr) {
+        final java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> src = ttsSourceWords;
+        if (src == null || ptr < 0 || ptr >= src.size()) {
+            return -1;
+        }
+        final String norm = normalizeWord(token);
+        if (norm.isEmpty()) {
+            return -1;
+        }
+        final int limit = Math.min(src.size(), ptr + 4);
+        for (int k = ptr; k < limit; k++) {
+            String wn = normalizeWord(src.get(k).getWord());
+            if (wn.isEmpty()) {
+                continue;
+            }
+            if (wn.equals(norm) || (wn.length() >= 2 && norm.startsWith(wn))
+                    || (norm.length() >= 2 && wn.startsWith(norm))) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    private static String normalizeWord(String w) {
+        if (w == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(w.length());
+        for (int i = 0; i < w.length(); i++) {
+            final char ch = w.charAt(i);
+            if (Character.isLetterOrDigit(ch)) {
+                out.append(Character.toLowerCase(ch));
+            }
+        }
+        return out.toString();
+    }
+
+    public void fireKokoroStart(String utteranceId) {
+        try {
+            if (kokoroProgressListener != null) {
+                kokoroProgressListener.onStart(utteranceId);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
 
     public void fireKokoroDone(String utteranceId) {
         try {
@@ -901,9 +969,35 @@ public class TTSEngine {
         }
         final float speed = sp;
         kok.stopInternal();
+        // word-by-word alignment state: pagePtr walks the page's word boxes,
+        // preLeft skips tokens carried over from the previous page (they map
+        // to the PREVIOUS page's words and must not consume this page's)
+        final WordAlign align = new WordAlign(ttsSourceOffset);
+        final boolean wordMode = AppState.get().ttsWordMode;
         if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
             kok.enqueueSilence(0, "Temp", sid, speed);
+            // resuming mid-page: advance the word matcher over the words of the
+            // paragraphs before the resume point, otherwise the first spoken
+            // word would highlight a word at the top of the page
+            if (wordMode) {
+                for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
+                    String skipped = parts[i] == null ? "" : parts[i];
+                    for (String w : skipped.split("\\s+")) {
+                        if (TxtUtils.isEmpty(w) || normalizeWord(w).isEmpty()) {
+                            continue;
+                        }
+                        if (align.preLeft > 0) {
+                            align.preLeft--;
+                            continue;
+                        }
+                        final int flat = matchSourceWord(w, align.pagePtr);
+                        if (flat >= 0) {
+                            align.pagePtr = flat + 1;
+                        }
+                    }
+                }
+            }
             for (int i = AppSP.get().lastBookParagraph; i < parts.length; i++) {
                 String big = parts[i] == null ? "" : parts[i].trim();
                 if (TxtUtils.isNotEmpty(big)) {
@@ -923,15 +1017,75 @@ public class TTSEngine {
                         LOG.d("next-page signal");
                         break;
                     }
-                    kok.enqueueSpeak(big, FINISHED_SIGNAL + i, sid, speed);
-                    kok.enqueueSilence(AppState.get().ttsPauseDuration, "Temp", sid, speed);
-                    LOG.d("kokoro pageHTML-parts", i);
+                    if (wordMode) {
+                        enqueueWordsRealtime(kok, big, i, sid, speed, align);
+                    } else {
+                        kok.enqueueSpeak(big, FINISHED_SIGNAL + i, sid, speed);
+                        kok.enqueueSilence(AppState.get().ttsPauseDuration, "Temp", sid, speed);
+                        LOG.d("kokoro pageHTML-parts", i);
+                    }
                 }
             }
             kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
         } else {
             LOG.d("kokoro pageHTML-parts-single");
-            kok.enqueueSpeak(text.replace(TxtUtils.TTS_PAUSE, ""), UTTERANCE_ID_DONE, sid, speed);
+            final String clean = text.replace(TxtUtils.TTS_PAUSE, "");
+            if (wordMode) {
+                enqueueWordsRealtime(kok, clean, -1, sid, speed, align);
+                kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
+            } else {
+                kok.enqueueSpeak(clean, UTTERANCE_ID_DONE, sid, speed);
+            }
+        }
+    }
+
+    /** Rolling state for matching spoken tokens to the page's word boxes. */
+    private static final class WordAlign {
+        int pagePtr;
+        int preLeft;
+
+        WordAlign(int preLeft) {
+            this.preLeft = preLeft;
+        }
+    }
+
+    /**
+     * Real-time word-by-word reading: every word becomes its own tiny
+     * utterance. A one-word clip synthesizes in tens of milliseconds, so the
+     * AI voice starts speaking almost instantly after Play and long sentences
+     * (the historical Kokoro hang) never reach the synthesizer at once.
+     * The utterance id "ttsW<flatIdx>" lets the reader view highlight the
+     * word while it is spoken.
+     */
+    private void enqueueWordsRealtime(final KokoroEngine kok, final String paragraph, final int paragraphIndex,
+                                      final int sid, final float speed, final WordAlign align) {
+        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
+        final String[] words = paragraph.split("\\s+");
+        for (final String w : words) {
+            if (TxtUtils.isEmpty(w)) {
+                continue;
+            }
+            if (normalizeWord(w).isEmpty()) {
+                // punctuation-only token: the synthesizer would produce no
+                // audio for it (and pointless queue items), just skip it
+                continue;
+            }
+            final int flat;
+            if (align.preLeft > 0) {
+                align.preLeft--;
+                flat = -1;
+            } else {
+                flat = matchSourceWord(w, align.pagePtr);
+                if (flat >= 0) {
+                    align.pagePtr = flat + 1;
+                }
+            }
+            kok.enqueueSpeak(w, WORD_SIGNAL + flat, sid, speed);
+            kok.enqueueSilence(wordPauseMs, "Temp", sid, speed);
+        }
+        if (paragraphIndex >= 0) {
+            // keep the resume protocol: paragraph i finished
+            kok.enqueueSilence(0, FINISHED_SIGNAL + paragraphIndex, sid, speed);
         }
     }
 

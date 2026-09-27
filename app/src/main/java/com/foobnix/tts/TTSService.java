@@ -68,6 +68,7 @@ import com.foobnix.sys.TempHolder;
 import org.ebookdroid.common.settings.books.SharedBooks;
 import org.ebookdroid.core.codec.CodecDocument;
 import org.ebookdroid.core.codec.CodecPage;
+import org.ebookdroid.droids.mupdf.codec.TextWord;
 import org.greenrobot.eventbus.EventBus;
 
 import java.io.IOException;
@@ -1073,6 +1074,35 @@ import java.util.List;
                 return;
             }
             String pageHTML = page.getPageHTML();
+            // capture the page's word boxes BEFORE the page is recycled: the
+            // word-by-word mode matches each spoken word against them so the
+            // reader view can highlight the word being spoken
+            try {
+                if (AppState.get().ttsWordMode && AppState.get().ttsWordHighlight) {
+                    TextWord[][] words2d = page.getText();
+                    List<TextWord> flat = new ArrayList<TextWord>();
+                    if (words2d != null) {
+                        for (TextWord[] line : words2d) {
+                            if (line == null) {
+                                continue;
+                            }
+                            for (TextWord w : line) {
+                                if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                                    continue;
+                                }
+                                flat.add(w);
+                            }
+                        }
+                    }
+                    TTSEngine.get().setTTSSourceWords(flat, countTokens(preText));
+                    LOG.d(TAG, "TTS word highlight: page words", flat.size());
+                } else {
+                    TTSEngine.get().setTTSSourceWords(null, 0);
+                }
+            } catch (Throwable t) {
+                LOG.e(t);
+                TTSEngine.get().setTTSSourceWords(null, 0);
+            }
             page.recycle();
             pageHTML = TxtUtils.replaceHTMLforTTS(pageHTML);
 
@@ -1119,6 +1149,20 @@ import java.util.List;
                          .setKokoroProgressListenerCompat(new UtteranceProgressListener() {
                              @Override public void onStart(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onStart", utteranceId);
+                                 // word-by-word mode: highlight the word being spoken
+                                 if (utteranceId != null && utteranceId.startsWith(TTSEngine.WORD_SIGNAL)
+                                         && AppState.get().ttsWordHighlight) {
+                                     try {
+                                         final int idx = Integer.parseInt(
+                                                 utteranceId.substring(TTSEngine.WORD_SIGNAL.length()));
+                                         if (idx >= 0) {
+                                             EventBus.getDefault()
+                                                     .post(new MessageTTSWord(AppSP.get().lastBookPage, idx));
+                                         }
+                                     } catch (NumberFormatException e) {
+                                         LOG.d(TAG, "bad word utterance id", utteranceId);
+                                     }
+                                 }
                              }
 
                              @Override public void onError(String utteranceId) {
@@ -1232,10 +1276,30 @@ import java.util.List;
             }, "@T TTS Save").start();
             }
 
+    /** number of whitespace-separated tokens in the given text (0 for empty) */
+    private static int countTokens(final String text) {
+        if (TxtUtils.isEmpty(text)) {
+            return 0;
+        }
+        int n = 0;
+        for (String t : text.split("\\s+")) {
+            if (TxtUtils.isNotEmpty(t)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     @Override public void onDestroy() {
         super.onDestroy();
 
         isStartForeground = false;
+        // the reader no longer needs the word highlight
+        try {
+            EventBus.getDefault().post(new MessageTTSWord(AppSP.get().lastBookPage, -1));
+        } catch (Throwable t) {
+            LOG.e(t);
+        }
         try {
             unregisterReceiver(blueToothReceiver);
         } catch (Exception e) {

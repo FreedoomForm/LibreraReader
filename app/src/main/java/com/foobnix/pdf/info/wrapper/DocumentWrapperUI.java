@@ -75,6 +75,7 @@ import com.foobnix.pdf.search.activity.msg.NotifyAllFragments;
 import com.foobnix.pdf.search.view.CloseAppDialog;
 import com.foobnix.sys.TempHolder;
 import com.foobnix.tts.MessagePageNumber;
+import com.foobnix.tts.MessageTTSWord;
 import com.foobnix.tts.TTSControlsView;
 import com.foobnix.tts.TTSEngine;
 import com.foobnix.tts.TTSService;
@@ -419,6 +420,20 @@ public class DocumentWrapperUI {
             if (dc != null) {
                 dc.onGoToPage(event.getPage() + 1);
                 showTtsControls();
+            }
+        } catch (Exception e) {
+            LOG.e(e);
+        }
+    }
+
+    /**
+     * Word-by-word TTS reading: highlight the word being spoken on the page.
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onTTSWord(MessageTTSWord event) {
+        try {
+            if (dc != null) {
+                dc.highlightTTSWord(event.getPage(), event.getWordIndex());
             }
         } catch (Exception e) {
             LOG.e(e);

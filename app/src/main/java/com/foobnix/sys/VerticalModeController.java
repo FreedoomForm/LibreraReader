@@ -192,6 +192,68 @@ public class VerticalModeController extends DocumentController {
         ctr.getDocumentController().clearSelectedText();
     }
 
+    /**
+     * Word-by-word TTS reading: mark the word currently being spoken so the
+     * page renderer draws its selection rectangle (EventDraw.drawSelectedText).
+     */
+    @Override
+    public void highlightTTSWord(final int page, final int wordIndex) {
+        try {
+            if (ctr == null || ctr.getDocumentModel() == null || ctr.getDocumentController() == null) {
+                return;
+            }
+            final Page p = ctr.getDocumentModel().getPageByDocIndex(page);
+            if (p == null || p.selectedText == null) {
+                return;
+            }
+            if (wordIndex < 0) {
+                if (!p.selectedText.isEmpty()) {
+                    p.selectedText.clear();
+                    ctr.getDocumentController().redrawView();
+                }
+                return;
+            }
+            // fetch the page words (also fills page.texts for the renderer)
+            TextWord[][] texts = null;
+            if (ctr.getDecodeService() != null) {
+                texts = ctr.getDecodeService().getTextForPage(page);
+            }
+            if (texts == null) {
+                return;
+            }
+            TextWord found = null;
+            int k = 0;
+            // the flat order must match the one the TTS service built
+            // (skipping null/empty words)
+            for (final TextWord[] line : texts) {
+                if (line == null) {
+                    continue;
+                }
+                for (final TextWord w : line) {
+                    if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                        continue;
+                    }
+                    if (k == wordIndex) {
+                        found = w;
+                        break;
+                    }
+                    k++;
+                }
+                if (found != null) {
+                    break;
+                }
+            }
+            if (found == null) {
+                return;
+            }
+            p.selectedText.clear();
+            p.selectedText.add(found);
+            ctr.getDocumentController().redrawView();
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
+
     @Override
     public void onSrollLeft() {
         // ctr.getDocumentController().getView().startPageScroll(5, 0);

@@ -64,6 +64,9 @@ public class KokoroEngine {
     private volatile AudioTrack track;
     /** bumped by every stop(); items from an older generation are stale */
     private volatile long generation = 0;
+    /** consecutive zero-sample generations - 3 in a row trip the system-TTS fallback */
+    private final java.util.concurrent.atomic.AtomicInteger zeroStreak =
+            new java.util.concurrent.atomic.AtomicInteger(0);
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     private final java.util.List<Runnable> pendingOnReady = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
@@ -318,17 +321,31 @@ public class KokoroEngine {
                 aborted = false;
                 android.util.Log.i(DIAG_TAG, "gen start: chars=" + (it.text == null ? -1 : it.text.length()) + ", sid=" + it.sid);
                 final long myGen = it.gen;
-                final AudioTrack fAt = buildTrack(t.getSampleRate());
-                track = fAt;
+                // ONE track per session: opening a fresh AudioTrack between words
+                // would add a hardware open/close gap to every single word. The
+                // track is drained (stop) after each item so the playback lag
+                // never exceeds one word, and released when the queue empties.
+                AudioTrack fAt = track;
+                if (fAt == null) {
+                    fAt = buildTrack(t.getSampleRate());
+                    track = fAt;
+                }
                 boolean canPlay = true;
                 try {
-                    fAt.play();
+                    if (fAt.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                        fAt.play();
+                    }
                 } catch (Throwable e) {
                     // without a playing track every write() below would fail and
                     // abort the generation instantly - report an error instead of
                     // a silent "done" that flips pages with no sound at all
                     LOG.e(e);
                     canPlay = false;
+                    // drop the broken track so the next item gets a fresh one
+                    try { fAt.release(); } catch (Throwable e2) { }
+                    if (track == fAt) {
+                        track = null;
+                    }
                 }
                 final boolean playOk = canPlay;
                 final long[] pcm = new long[1];
@@ -371,6 +388,10 @@ public class KokoroEngine {
                 try {
                     genThread.setDaemon(true);
                 } catch (Throwable e) {
+                }
+                // tell the UI the word is being spoken right now (word highlight)
+                if (!aborted && myGen == generation) {
+                    TTSEngine.get().fireKokoroStart(it.utteranceId);
                 }
                 genThread.start();
                 // Kill-switches: no FIRST audio (default 60s) or a stalled stream
@@ -430,12 +451,19 @@ public class KokoroEngine {
                     android.util.Log.i(DIAG_TAG, "gen done: " + pcm[0] + " samples, RTF "
                             + String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
+                // let the just-generated audio play out and keep the track for
+                // the next word; release it only when nothing else is queued
                 try { fAt.stop(); } catch (Throwable e) { }
-                try { fAt.release(); } catch (Throwable e) { }
-                track = null;
+                if (queue.isEmpty()) {
+                    try { fAt.release(); } catch (Throwable e) { }
+                    if (track == fAt) {
+                        track = null;
+                    }
+                }
                 generating = false;
                 if (!aborted && myGen == generation) {
                     if (pcm[0] > 0) {
+                        zeroStreak.set(0);
                         TTSEngine.get().fireKokoroDone(it.utteranceId);
                     } else {
                         // zero samples = something failed silently - report an
@@ -444,6 +472,15 @@ public class KokoroEngine {
                         android.util.Log.i(DIAG_TAG, "ZERO SAMPLES for sid=" + it.sid);
                         toastSafe("AI voice error: no audio for this text");
                         TTSEngine.get().fireKokoroError(it.utteranceId);
+                        // one empty clip is an edge case, several in a row mean
+                        // the engine is broken on this device - stop paging
+                        // silently through the rest of the book, use system voice
+                        if (zeroStreak.incrementAndGet() >= 3) {
+                            android.util.Log.i(DIAG_TAG, "WATCHDOG: 3 empty generations in a row - system TTS fallback");
+                            LOG.e(new IllegalStateException("kokoro: 3 consecutive zero-sample generations"));
+                            zeroStreak.set(0);
+                            TTSEngine.get().onKokoroFailure();
+                        }
                     }
                 }
             } else {

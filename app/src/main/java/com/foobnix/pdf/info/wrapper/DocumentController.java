@@ -707,6 +707,15 @@ public abstract class DocumentController {
         return null;
     }
 
+    /**
+     * Word-by-word TTS reading: highlight the word currently being spoken.
+     *
+     * @param page      0-based book page index
+     * @param wordIndex flat index into the page's reading-order word list; -1 clears
+     */
+    public void highlightTTSWord(final int page, final int wordIndex) {
+    }
+
     public String getBookmarkText() {
         try {
             CodecDocument doc = getCodecDocument();

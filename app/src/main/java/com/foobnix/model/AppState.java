@@ -299,7 +299,7 @@ public class AppState {
     }
 
     static {
-        TTS_ENGINES.put("Google Text-to-Speech",
+        TTS_ENGINES.put("Google TTS (local)",
                 "https://play.google.com/store/apps/details?id=com.google.android.tts");
         TTS_ENGINES.put("Acapela TTS Voices",
                 "https://play.google.com/store/apps/details?id=com.acapelagroup.android.tts");
@@ -414,6 +414,12 @@ public class AppState {
     // Offline AI TTS (Kokoro-82M, bundled in the APK)
     public volatile boolean ttsUseKokoro = true;
     public volatile String ttsKokoroVoice = "af_heart";
+    // Real-time reading: one word per utterance (short clips synthesize almost
+    // instantly, so the AI voice starts talking right after Play and long
+    // sentences never reach the synthesizer at once)
+    public volatile boolean ttsWordMode = true;
+    // Highlight the word that is currently being spoken on the book page
+    public volatile boolean ttsWordHighlight = true;
     @IgnoreHashCode public boolean isEnalbeTTSReplacements = true;
     public boolean isReferenceMode = false;
     public boolean isShowPageNumbers = false;

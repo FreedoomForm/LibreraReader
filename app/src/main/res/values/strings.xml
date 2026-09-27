@@ -709,5 +709,16 @@
     <string name="tts_diag_copied">Report copied</string>
     <string name="tts_diag_hint">If the AI voice is silent: press Play in the book, wait a minute, then run this test and send the report to the developer (Copy button).</string>
     <string name="tts_system_init_failed">System TTS engine failed to start - check the text-to-speech settings of your device</string>
+    <string name="tts_word_mode_title">Real-time word by word</string>
+    <string name="tts_word_mode_on">Real-time word by word: ON</string>
+    <string name="tts_word_mode_off">Real-time word by word: OFF</string>
+    <string name="tts_word_highlight_title">Highlight spoken word</string>
+    <string name="tts_word_highlight_on">Highlight spoken word: ON</string>
+    <string name="tts_word_highlight_off">Highlight spoken word: OFF</string>
+    <string name="tts_engine_title">Voice engine</string>
+    <string name="tts_engine_kokoro">Kokoro TTS (built-in AI)</string>
+    <string name="tts_engine_system">%s (system)</string>
+    <string name="tts_engine_google_local">Google TTS (local)</string>
+    <string name="tts_installed">installed</string>
     <string name="tts_continues_in_background">Reading continues in the background - tap the notification to return</string>
 </resources>

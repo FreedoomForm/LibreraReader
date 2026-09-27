@@ -931,6 +931,48 @@ public class DragingDialogs {
                         openKokoroVoicePicker.run();
                     }
                 });
+
+                // ---- real-time word-by-word reading + word highlight toggles ----
+                final TextView ttsWordMode = view.findViewById(R.id.ttsWordMode);
+                final TextView ttsWordModeState = view.findViewById(R.id.ttsWordModeState);
+                final OnClickListener wordModeToggle = new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        AppState.get().ttsWordMode = !AppState.get().ttsWordMode;
+                        AppState.get().save(v.getContext());
+                        TTSEngine.get().stop();
+                        ttsWordModeState.setText(AppState.get().ttsWordMode ? R.string.tts_word_mode_on
+                                                                            : R.string.tts_word_mode_off);
+                        org.greenrobot.eventbus.EventBus.getDefault()
+                                .post(new com.foobnix.tts.TtsStatus());
+                    }
+                };
+                ttsWordMode.setOnClickListener(wordModeToggle);
+                ttsWordModeState.setOnClickListener(wordModeToggle);
+                ttsWordModeState.setText(AppState.get().ttsWordMode ? R.string.tts_word_mode_on : R.string.tts_word_mode_off);
+                TxtUtils.underlineTextView(ttsWordMode);
+                TxtUtils.underlineTextView(ttsWordModeState);
+
+                final TextView ttsWordHighlight = view.findViewById(R.id.ttsWordHighlight);
+                final TextView ttsWordHighlightState = view.findViewById(R.id.ttsWordHighlightState);
+                final OnClickListener wordHighlightToggle = new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        AppState.get().ttsWordHighlight = !AppState.get().ttsWordHighlight;
+                        AppState.get().save(v.getContext());
+                        ttsWordHighlightState.setText(AppState.get().ttsWordHighlight ? R.string.tts_word_highlight_on
+                                                                                      : R.string.tts_word_highlight_off);
+                        if (!AppState.get().ttsWordHighlight) {
+                            // remove the highlight already drawn on the page
+                            org.greenrobot.eventbus.EventBus.getDefault()
+                                    .post(new com.foobnix.tts.MessageTTSWord(AppSP.get().lastBookPage, -1));
+                        }
+                    }
+                };
+                ttsWordHighlight.setOnClickListener(wordHighlightToggle);
+                ttsWordHighlightState.setOnClickListener(wordHighlightToggle);
+                ttsWordHighlightState.setText(AppState.get().ttsWordHighlight ? R.string.tts_word_highlight_on
+                                                                              : R.string.tts_word_highlight_off);
+                TxtUtils.underlineTextView(ttsWordHighlight);
+                TxtUtils.underlineTextView(ttsWordHighlightState);
                 final TextView ttsDiag = view.findViewById(R.id.ttsDiag);
                 final TextView ttsDiagNote = view.findViewById(R.id.ttsDiagNote);
                 if (TTSEngine.kokoroFallbackActive) {
@@ -956,21 +998,78 @@ public class DragingDialogs {
 
                 view.findViewById(R.id.onHelp).setOnClickListener(new OnClickListener() {
                     @Override public void onClick(final View v) {
+                        final PackageManager pm = v.getContext().getPackageManager();
+                        final java.util.regex.Pattern pkgP = java.util.regex.Pattern.compile("[?&]id=([\\w.]+)");
                         MyPopupMenu menu = new MyPopupMenu(v);
-                        for (final String key : AppState.TTS_ENGINES.keySet()) {
-                            menu.getMenu().add(key).setOnMenuItemClickListener(new OnMenuItemClickListener() {
+                        // the built-in offline AI engine needs no install - offer it first
+                        menu.getMenu()
+                            .add(activity.getString(R.string.tts_engine_kokoro) + " \u2713")
+                            .setOnMenuItemClickListener(new OnMenuItemClickListener() {
                                 @Override public boolean onMenuItemClick(MenuItem item) {
-                                    String value = AppState.TTS_ENGINES.get(key);
-                                    String play = value.replace("https://play.google.com/store/apps/details?",
-                                                                "market://details?");
-                                    try {
-                                        Urls.open(v.getContext(), play);
-                                    } catch (Exception e) {
-                                        Urls.open(v.getContext(), value);
-                                    }
+                                    TTSEngine.get().stop();
+                                    AppState.get().ttsUseKokoro = true;
+                                    TTSEngine.kokoroFallbackActive = false;
+                                    KokoroEngine.get().prepareAsync(null, true);
+                                    AppState.get().save(activity);
+                                    textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
+                                    ttsKokoroToggle.setText(R.string.tts_kokoro_on);
+                                    org.greenrobot.eventbus.EventBus.getDefault()
+                                            .post(new com.foobnix.tts.TtsStatus());
                                     return false;
                                 }
                             });
+                        for (final String key : AppState.TTS_ENGINES.keySet()) {
+                            final String value = AppState.TTS_ENGINES.get(key);
+                            String pkgFound = null;
+                            try {
+                                final Matcher m = pkgP.matcher(value);
+                                if (m.find()) {
+                                    pkgFound = m.group(1);
+                                }
+                            } catch (Exception e) {
+                                LOG.e(e);
+                            }
+                            final String pkg = pkgFound;
+                            boolean isInstalled = false;
+                            if (pkg != null) {
+                                try {
+                                    pm.getPackageInfo(pkg, 0);
+                                    isInstalled = true;
+                                } catch (Exception e) {
+                                    isInstalled = false;
+                                }
+                            }
+                            final boolean installed = isInstalled;
+                            menu.getMenu()
+                                .add(key + (installed ? " \u2713" : ""))
+                                .setOnMenuItemClickListener(new OnMenuItemClickListener() {
+                                    @Override public boolean onMenuItemClick(MenuItem item) {
+                                        if (installed && pkg != null) {
+                                            // already on the device: make it the active voice
+                                            TTSEngine.get().stop();
+                                            AppState.get().ttsUseKokoro = false;
+                                            try {
+                                                TTSEngine.get().setTTSWithEngine(pkg);
+                                            } catch (Throwable t) {
+                                                LOG.e(t);
+                                            }
+                                            AppState.get().save(activity);
+                                            textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                                            ttsKokoroToggle.setText(R.string.tts_kokoro_off);
+                                            org.greenrobot.eventbus.EventBus.getDefault()
+                                                    .post(new com.foobnix.tts.TtsStatus());
+                                        } else {
+                                            String play = value.replace("https://play.google.com/store/apps/details?",
+                                                                        "market://details?");
+                                            try {
+                                                Urls.open(v.getContext(), play);
+                                            } catch (Exception e) {
+                                                Urls.open(v.getContext(), value);
+                                            }
+                                        }
+                                        return false;
+                                    }
+                                });
                         }
                         menu.show();
                     }
@@ -1117,13 +1216,99 @@ public class DragingDialogs {
                 }
 
                 View ttsSettings = view.findViewById(R.id.ttsSettings);
+                // full engine picker: the built-in AI voice plus every system
+                // TTS engine installed on the device (Google TTS, RHVoice,
+                // SherpaTTS, ...). No TextToSpeech binding - PackageManager only.
+                final Runnable openEnginePicker = new Runnable() {
+                    @Override public void run() {
+                        final List<String> labels = new ArrayList<String>();
+                        final List<String> pkgs = new ArrayList<String>(); // null = built-in Kokoro
+                        labels.add(activity.getString(R.string.tts_engine_kokoro) + " \u2014 "
+                                           + KokoroVoices.display(AppState.get().ttsKokoroVoice));
+                        pkgs.add(null);
+                        String currentPkg = null;
+                        try {
+                            currentPkg = android.provider.Settings.Secure.getString(activity.getContentResolver(),
+                                    android.provider.Settings.Secure.TTS_DEFAULT_SYNTH);
+                        } catch (Exception e) {
+                            LOG.e(e);
+                        }
+                        final PackageManager pm = activity.getPackageManager();
+                        List<ResolveInfo> engines = null;
+                        try {
+                            engines = pm.queryIntentServices(
+                                    new Intent(android.speech.tts.TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0);
+                        } catch (Exception e) {
+                            LOG.e(e);
+                        }
+                        if (engines != null) {
+                            for (final ResolveInfo info : engines) {
+                                if (info == null || info.serviceInfo == null) {
+                                    continue;
+                                }
+                                final String pkg = info.serviceInfo.packageName;
+                                if (pkgs.contains(pkg)) {
+                                    continue;
+                                }
+                                String label;
+                                try {
+                                    label = activity.getString(R.string.tts_engine_system,
+                                            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)));
+                                } catch (Exception e) {
+                                    label = pkg;
+                                }
+                                labels.add(label);
+                                pkgs.add(pkg);
+                            }
+                        }
+                        int checkedIdx = 0;
+                        if (!AppState.get().ttsUseKokoro) {
+                            checkedIdx = -1;
+                            if (currentPkg != null) {
+                                checkedIdx = pkgs.indexOf(currentPkg);
+                            }
+                            if (checkedIdx < 0) {
+                                checkedIdx = pkgs.indexOf("com.google.android.tts");
+                            }
+                        }
+                        final int checked = checkedIdx;
+                        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(activity);
+                        b.setTitle(R.string.tts_engine_title);
+                        b.setSingleChoiceItems(labels.toArray(new String[labels.size()]), checked,
+                                new android.content.DialogInterface.OnClickListener() {
+                                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                                        TTSEngine.get().stop();
+                                        if (which == 0) {
+                                            // built-in offline AI voice
+                                            AppState.get().ttsUseKokoro = true;
+                                            TTSEngine.kokoroFallbackActive = false;
+                                            KokoroEngine.get().prepareAsync(null, true);
+                                            textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
+                                        } else {
+                                            final String pkg = pkgs.get(which);
+                                            AppState.get().ttsUseKokoro = false;
+                                            try {
+                                                TTSEngine.get().setTTSWithEngine(pkg);
+                                            } catch (Throwable t) {
+                                                LOG.e(t);
+                                            }
+                                            textEngine.setText(labels.get(which));
+                                        }
+                                        ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on
+                                                                                            : R.string.tts_kokoro_off);
+                                        AppState.get().save(activity);
+                                        org.greenrobot.eventbus.EventBus.getDefault()
+                                                .post(new com.foobnix.tts.TtsStatus());
+                                        dialog.dismiss();
+                                    }
+                                });
+                        b.setNegativeButton(R.string.cancel, null);
+                        b.show();
+                    }
+                };
                 textEngine.setOnClickListener(new OnClickListener() {
                     @Override public void onClick(View v) {
-                        if (AppState.get().ttsUseKokoro) {
-                            openKokoroVoicePicker.run();
-                        } else {
-                            ttsSettings.performClick();
-                        }
+                        openEnginePicker.run();
                     }
                 });
                 ttsLang.setOnClickListener((v) -> ttsSettings.performClick());
