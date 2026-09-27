@@ -83,16 +83,26 @@ if [ -z "$BACK_PID" ]; then
   exit 1
 fi
 grep -m 5 "Kokoro\|TTSService\|keep-alive" logcat-tts.txt || true
-# Deterministic Kokoro check: the engine unpacks its model to files/kokoro on
-# first use (logcat tags are gated by AppsConfig.IS_LOG, so they may be absent)
-if adb shell run-as com.foobnix.pdf.reader.ai test -f files/kokoro/model.int8.onnx; then
-              echo "KOKORO MODEL EXTRACTED - offline AI engine path was used"
-            else
-              echo "::error::KOKORO ENGINE NOT USED - model was never unpacked"
-              exit 1
-            fi
-            KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
-            echo "KokoroEngine log lines (informational): $KOK"
+# Deterministic Kokoro check. run-as is NOT available for the release APK
+# (non-debuggable, Android 14 image denies it), so verify via logcat evidence:
+# the engine logs "model extracted to" on first unpack; run-as stays as a
+# fallback channel for debug builds.
+if grep -q "model extracted to" logcat-tts.txt \
+   || adb shell run-as com.foobnix.pdf.reader.ai test -f files/kokoro/model.int8.onnx; then
+  echo "KOKORO MODEL EXTRACTED - offline AI engine path was used"
+else
+  echo "::error::KOKORO ENGINE NOT USED - model was never unpacked"
+  exit 1
+fi
+if grep -q "kokoro gen" logcat-tts.txt; then
+  echo "KOKORO SYNTHESIS CONFIRMED (RTF diagnostics present)"
+  grep -m 3 "kokoro gen" logcat-tts.txt || true
+else
+  echo "::error::KOKORO SYNTHESIS MISSING - engine prepared but produced no audio"
+  exit 1
+fi
+KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
+echo "KokoroEngine log lines (informational): $KOK"
             ULE=$(grep -c "UnsatisfiedLinkError" logcat-tts.txt || true)
             if [ "$ULE" != "0" ]; then
               echo "::error::UnsatisfiedLinkError during TTS - native libs broken"
