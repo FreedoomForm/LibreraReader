@@ -7,9 +7,13 @@ set -x
 cd "${GITHUB_WORKSPACE:-$PWD}" || exit 1
 
 PKG="com.foobnix.pdf.reader.ai"
-APK=$(find dist -name "*x86_64*.apk" | head -1)
-if [ -z "$APK" ]; then
-  APK=$(find dist -name "*.apk" | head -1)
+if [ -n "$TEST_APK" ] && [ -f "$TEST_APK" ]; then
+  APK="$TEST_APK"
+else
+  APK=$(find dist -name "*x86_64*.apk" | head -1)
+  if [ -z "$APK" ]; then
+    APK=$(find dist -name "*.apk" | head -1)
+  fi
 fi
 echo "Installing: $APK"
 if [ -z "$APK" ]; then
@@ -110,3 +114,42 @@ echo "KokoroEngine log lines (informational): $KOK"
               exit 1
             fi
             echo "EMULATOR SMOKE TEST PASSED: launch + Kokoro TTS playback + back-key survival"
+
+# ---------- 4. RUSSIAN TEXT PHASE (espeak-ng phonemization path) ----------
+# Real users read Cyrillic books: this text goes through the espeak phonemizer.
+# A native hang here used to poison the single-thread executor - every later
+# Play/preview stayed silent forever. Must synthesize or fail loudly.
+adb shell am force-stop "$PKG" || true
+sleep 3
+adb shell am start -W -n "$PKG/$LAUNCHER"
+sleep 20
+printf 'ÐÑÐ¸Ð²ÐµÑ Ð¼Ð¸Ñ. Ð­ÑÐ¾ ÑÐµÑÑ ÑÑÑÑÐºÐ¾Ð³Ð¾ ÑÐ·ÑÐºÐ°. Ð¡Ð¸Ð½ÑÐµÐ· ÑÐµÑÐ¸ Ð´Ð¾Ð»Ð¶ÐµÐ½ ÑÐ°Ð±Ð¾ÑÐ°ÑÑ Ð¸ Ñ ÐºÐ¸ÑÐ¸Ð»Ð»Ð¸ÑÐ¾Ð¹.' > ttsbook_ru.txt
+adb push ttsbook_ru.txt /storage/emulated/0/Android/data/$PKG/files/librera_tts_test_ru.txt || exit 1
+adb logcat -c || true
+adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
+  -a ACTION_PLAY_CURRENT_PAGE \
+  --ei INT 0 \
+  --es EXTRA_PATH /storage/emulated/0/Android/data/$PKG/files/librera_tts_test_ru.txt \
+  --ei EXTRA_W 1080 --ei EXTRA_H 2400 || true
+sleep 150
+adb logcat -d > logcat-tts-ru.txt || true
+RU_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
+echo "RU phase PID: $RU_PID"
+if [ -z "$RU_PID" ]; then
+  echo "::error::APP DIED DURING RUSSIAN TTS"
+  grep -A 50 "FATAL EXCEPTION" logcat-tts-ru.txt || true
+  exit 1
+fi
+if grep -q "kokoro timeout\|kokoro failure" logcat-tts-ru.txt; then
+  echo "::error::KOKORO HANG/FAILURE REPRODUCED ON RUSSIAN TEXT"
+  grep -m 5 -B 2 -A 8 "kokoro timeout\|kokoro failure" logcat-tts-ru.txt || true
+  exit 1
+fi
+RU_GEN=$(grep -c "kokoro gen" logcat-tts-ru.txt || true)
+echo "RU synthesis items: $RU_GEN"
+if [ "$RU_GEN" == "0" ]; then
+  echo "::error::NO RUSSIAN SYNTHESIS - kokoro produced no audio for Cyrillic text"
+  grep -m 25 "KokoroEngine\|TTSService\|AI TTS" logcat-tts-ru.txt || true
+  exit 1
+fi
+echo "EMULATOR SMOKE TEST PASSED (RU too): Russian text synthesized without hangs"

@@ -278,6 +278,10 @@ import java.util.List;
                     Manifest.permission.POST_NOTIFICATIONS)) {
                 openNotificationSettings(context);
             } else {
+                // permanently denied: the system dialog never shows and Play
+                // would do nothing at all - at least tell the user why
+                android.widget.Toast.makeText(context, R.string.tts_kokoro_notif,
+                        android.widget.Toast.LENGTH_LONG).show();
                 ActivityCompat.requestPermissions(activity,
                         new String[]{Manifest.permission.POST_NOTIFICATIONS}, 11);
             }

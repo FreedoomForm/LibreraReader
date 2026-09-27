@@ -313,45 +313,80 @@ public class KokoroEngine {
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
+                final java.util.concurrent.atomic.AtomicBoolean genDone =
+                        new java.util.concurrent.atomic.AtomicBoolean(false);
                 final long genStart = android.os.SystemClock.elapsedRealtime();
-                final Handler main = new Handler(Looper.getMainLooper());
-                // watchdog: if the native synthesis produces nothing (JNI hang,
-                // stuck espeak on exotic text, dead audio output) the reader
-                // would stay silent forever - abort it and switch to fallback
-                final Runnable watchdog = new Runnable() {
+                // Run the native synthesis on a DEDICATED thread: a stuck generate
+                // (espeak infinite loop on exotic text) must never block the shared
+                // executor - otherwise every later Play/preview stays silent forever.
+                final Thread genThread = new Thread(new Runnable() {
                     public void run() {
-                        if (!gotAudio.get() && !aborted && myGen == generation && generating) {
-                            LOG.e(new IllegalStateException("kokoro watchdog: no audio within 60s"));
-                            TTSEngine.get().onKokoroFailure();
-                            stopInternal();
-                            generating = false;
-                            TTSEngine.get().fireKokoroError(it.utteranceId);
+                        try {
+                            if (playOk) {
+                                t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
+                                    public Integer invoke(float[] samples) {
+                                        if (aborted || myGen != generation || fAt == null) {
+                                            return 0;
+                                        }
+                                        try {
+                                            fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
+                                            pcm[0] += samples.length;
+                                            gotAudio.set(true);
+                                        } catch (Throwable e) {
+                                            return 0;
+                                        }
+                                        return 1;
+                                    }
+                                });
+                            }
+                        } catch (Throwable e) {
+                            LOG.e(e);
+                        } finally {
+                            genDone.set(true);
                         }
                     }
-                };
-                main.postDelayed(watchdog, 60000);
+                });
+                genThread.setName("kokoro-gen");
                 try {
-                    if (playOk) {
-                        t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
-                            public Integer invoke(float[] samples) {
-                                if (aborted || myGen != generation || fAt == null) {
-                                    return 0;
-                                }
-                                try {
-                                    fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
-                                    pcm[0] += samples.length;
-                                    gotAudio.set(true);
-                                } catch (Throwable e) {
-                                    return 0;
-                                }
-                                return 1;
-                            }
-                        });
-                    }
+                    genThread.setDaemon(true);
                 } catch (Throwable e) {
-                    LOG.e(e);
-                } finally {
-                    main.removeCallbacks(watchdog);
+                }
+                genThread.start();
+                // Kill-switches: no FIRST audio within 60s, or the stream stalled
+                // for 30s. A healthy stream is never abandoned - only a hung one.
+                long lastCount = -1L;
+                long lastProgress = genStart;
+                while (!genDone.get() && !aborted && myGen == generation) {
+                    if (pcm[0] != lastCount) {
+                        lastCount = pcm[0];
+                        lastProgress = android.os.SystemClock.elapsedRealtime();
+                    }
+                    long stalledMs = android.os.SystemClock.elapsedRealtime() - lastProgress;
+                    if (!gotAudio.get() && stalledMs > 60000) {
+                        LOG.e(new IllegalStateException("kokoro timeout: no audio within 60s"));
+                        TTSEngine.get().onKokoroFailure();
+                        break;
+                    }
+                    if (gotAudio.get() && stalledMs > 30000) {
+                        LOG.e(new IllegalStateException("kokoro timeout: audio stream stalled"));
+                        TTSEngine.get().onKokoroFailure();
+                        break;
+                    }
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+                if (!genDone.get()) {
+                    // timed out (or stopped): release the track so a thread stuck
+                    // in WRITE_BLOCKING gets an exception and exits; a leaked
+                    // native thread (espeak hang) is a daemon and dies with us
+                    aborted = true;
+                    stopInternal();
+                    generating = false;
+                    TTSEngine.get().fireKokoroError(it.utteranceId);
+                    return;
                 }
                 if (pcm[0] > 0) {
                     float audioSec = pcm[0] / (float) t.getSampleRate();
@@ -372,6 +407,7 @@ public class KokoroEngine {
                         // zero samples = something failed silently - report an
                         // error so the session stops instead of paging silently
                         LOG.e(new IllegalStateException("kokoro item produced 0 samples"));
+                        toastSafe("AI voice error: no audio for this text");
                         TTSEngine.get().fireKokoroError(it.utteranceId);
                     }
                 }
