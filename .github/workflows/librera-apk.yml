@@ -131,19 +131,27 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/kokoro
 
-      - name: Add x86_64 native libs (for emulator smoke test)
+      - name: Add x86_64 + armeabi-v7a native libs (static-link sherpa-onnx)
         run: |
           set -e
-          mkdir -p app/src/main/jniLibs/x86_64
           SHP_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-android-static-link-onnxruntime.tar.bz2"
           curl -sL -o /tmp/shp.tar.bz2 "$SHP_URL"
           mkdir -p /tmp/shp && tar -xjf /tmp/shp.tar.bz2 -C /tmp/shp
-          SHP=$(find /tmp/shp -name "libsherpa-onnx-jni.so" -path "*x86_64*" | head -1)
-          echo "found: $SHP"
-          cp "$SHP" app/src/main/jniLibs/x86_64/
-          CPP=$(find /tmp/shp -name "libc++_shared.so" | head -1)
-          if [ -n "$CPP" ]; then cp "$CPP" app/src/main/jniLibs/x86_64/; fi
-          ls -la app/src/main/jniLibs/x86_64/
+          for ABI in x86_64 armeabi-v7a; do
+            DST="app/src/main/jniLibs/$ABI"
+            mkdir -p "$DST"
+            SHP=$(find /tmp/shp -name "libsherpa-onnx-jni.so" -path "*$ABI*" | head -1)
+            if [ -z "$SHP" ]; then
+              echo "WARN: no libsherpa-onnx-jni.so for $ABI in tarball; skip"
+              rm -rf "$DST"
+              continue
+            fi
+            echo "$ABI: $SHP"
+            cp "$SHP" "$DST/"
+            CPP=$(find /tmp/shp -name "libc++_shared.so" -path "*$ABI*" | head -1)
+            if [ -n "$CPP" ]; then cp "$CPP" "$DST/"; fi
+            ls -la "$DST/"
+          done
 
       - name: Build APK (fdroid flavor, debug)
         run: |
@@ -188,7 +196,39 @@ jobs:
           cp "$APK" dist/Librera-AI-Kokoro.apk
           X86=$(find app/build/outputs/apk -name "*.apk" | grep -i "x86_64" | head -1)
           if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-Kokoro-x86_64.apk; fi
-          ls -la dist
+          ARM=$(find app/build/outputs/apk -name "*.apk" | grep -i -- "-arm\." | head -1)
+          if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-AI-Kokoro-arm32.apk; fi
+          mkdir -p dist/release
+          cp dist/Librera-AI-Kokoro.apk dist/release/
+          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then cp dist/Librera-AI-Kokoro-arm32.apk dist/release/; fi
+          ls -la dist dist/release
+
+      - name: Verify installability (apksigner signature + 16KB alignment)
+        run: |
+          set -e
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --verbose dist/Librera-AI-Kokoro.apk
+          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then
+            "$APKSIGNER" verify --verbose dist/Librera-AI-Kokoro-arm32.apk
+          fi
+          python3 - <<'PY'
+          import struct, zipfile
+          for apk in ['dist/Librera-AI-Kokoro.apk', 'dist/Librera-AI-Kokoro-arm32.apk']:
+              try:
+                  z = zipfile.ZipFile(apk)
+              except OSError:
+                  continue
+              def off(info):
+                  z.fp.seek(info.header_offset)
+                  h = z.fp.read(30)
+                  n, e = struct.unpack('<HH', h[26:30])
+                  return info.header_offset + 30 + n + e
+              bad = [i.filename for i in z.infolist()
+                     if i.filename.endswith('.so') and i.compress_type == 0 and off(i) % 16384]
+              assert not bad, '%s: .so not 16KB-aligned: %s' % (apk, bad)
+              print('%s: signature + 16KB alignment OK (%d entries)' % (apk, len(z.namelist())))
+          PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -256,17 +296,47 @@ jobs:
           name: librera-apks
           path: dist
 
-      - name: Generate SHA256SUMS
-        run: sha256sum dist/*.apk > dist/SHA256SUMS.txt
+      - name: Clean stale release assets (prevent trap/duplicate assets)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          REPO = 'FreedoomForm/LibreraReader'
+          TAG = 'librera-apk-latest'
+          KEEP = {'Librera-AI-Kokoro.apk', 'Librera-AI-Kokoro-arm32.apk', 'SHA256SUMS.txt'}
+          H = {'Authorization': 'token ' + os.environ['GITHUB_TOKEN'], 'User-Agent': 'ci-cleanup'}
+          try:
+              url = 'https://api.github.com/repos/%s/releases/tags/%s?nocache=%d' % (REPO, TAG, time.time_ns() % 10**9)
+              rel = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=H)))
+          except Exception as e:
+              print('release lookup skipped:', e)
+              raise SystemExit(0)
+          for a in rel.get('assets', []):
+              if a['name'] not in KEEP:
+                  try:
+                      u = 'https://api.github.com/repos/%s/releases/assets/%d' % (REPO, a['id'])
+                      urllib.request.urlopen(urllib.request.Request(u, headers=H, method='DELETE'))
+                      print('deleted stale asset:', a['name'])
+                  except Exception as e:
+                      print('delete failed:', a['name'], e)
+          PY
+
+      - name: Generate SHA256SUMS (published files only)
+        run: |
+          cd dist/release
+          sha256sum Librera-AI-Kokoro.apk > SHA256SUMS.txt
+          if [ -f Librera-AI-Kokoro-arm32.apk ]; then
+            sha256sum Librera-AI-Kokoro-arm32.apk >> SHA256SUMS.txt
+          fi
+          cat SHA256SUMS.txt
 
       - name: Publish to release (tag librera-apk-latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: librera-apk-latest
           name: "Librera Reader - Offline AI TTS (Kokoro-82M)"
-          files: |
-            dist/Librera-AI-Kokoro.apk
-            dist/SHA256SUMS.txt
+          files: dist/release/*
           prerelease: true
           allow_updates: true
           replaces_artifacts: true
