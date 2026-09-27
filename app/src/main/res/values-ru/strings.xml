@@ -702,4 +702,11 @@
     <string name="tts_kokoro_on">AI-\u0433\u043e\u043b\u043e\u0441 (Kokoro): \u0412\u041a\u041b</string>
     <string name="tts_kokoro_off">AI-\u0433\u043e\u043b\u043e\u0441 (Kokoro): \u0412\u042b\u041a\u041b</string>
     <string name="tts_kokoro_init">\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043e\u0444\u043b\u0430\u0439\u043d AI-\u0433\u043e\u043b\u043e\u0441\u0430\u2026</string>
+    <string name="tts_diag_title">Диагностика TTS</string>
+    <string name="tts_diag_run">Запустить тест</string>
+    <string name="tts_diag_copy">Копировать отчёт</string>
+    <string name="tts_diag_share">Поделиться отчётом</string>
+    <string name="tts_diag_copied">Отчёт скопирован</string>
+    <string name="tts_diag_hint">Если ИИ-голос молчит: нажмите Play в книге, подождите минуту, затем запустите этот тест и отправьте отчёт разработчику (кнопка «Копировать»).</string>
+    <string name="tts_system_init_failed">Системный TTS-движок не запустился — проверьте настройки синтеза речи на устройстве</string>
 </resources>

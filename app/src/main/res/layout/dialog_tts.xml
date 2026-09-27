@@ -129,6 +129,28 @@
                 android:text="@string/empy" />
         </LinearLayout>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/ttsDiag"
+                style="@style/textLink"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="110dip"
+                android:text="@string/tts_diag_title" />
+
+            <TextView
+                android:id="@+id/ttsDiagNote"
+                android:lines="1"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/empy" />
+        </LinearLayout>
+
         <com.foobnix.pdf.info.view.CustomSeek
             android:id="@+id/seekBarSpeed"
             android:layout_width="match_parent"

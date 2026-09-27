@@ -36,6 +36,8 @@ import java.util.concurrent.Executors;
 public class KokoroEngine {
     public static final String MODEL_VERSION = "kokoro-int8-multi-lang-v1.0-1";
     private static final String TAG = "KokoroEngine";
+    /** always-on log tag: visible even in release builds (LOG.* is compiled out) */
+    private static final String DIAG_TAG = "KokoroDiag";
     private static KokoroEngine INSTANCE = new KokoroEngine();
 
     public static KokoroEngine get() {
@@ -103,7 +105,10 @@ public class KokoroEngine {
             public void run() {
                 try {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                    long initStart = android.os.SystemClock.elapsedRealtime();
                     prepareInternal();
+                    android.util.Log.i(DIAG_TAG, "kokoro init OK in "
+                            + (android.os.SystemClock.elapsedRealtime() - initStart) + " ms, sampleRate=" + tts.getSampleRate());
                     for (Runnable r : pendingOnReady) {
                         try {
                             r.run();
@@ -113,6 +118,7 @@ public class KokoroEngine {
                     }
                 } catch (Throwable e) {
                     LOG.e(e);
+                    android.util.Log.i(DIAG_TAG, "kokoro init FAILED: " + e);
                     ready = false;
                     toastSafe("AI TTS init failed: " + e.getClass().getSimpleName());
                 } finally {
@@ -142,6 +148,7 @@ public class KokoroEngine {
         }
         LOG.d(TAG, "prepare start");
         File dir = extractModel();
+        android.util.Log.i(DIAG_TAG, "model ready: model.int8.onnx=" + new File(dir, "model.int8.onnx").length() + " bytes");
         OfflineTtsKokoroModelConfig k = OfflineTtsKokoroModelConfig.builder()
                 .setModel(new File(dir, "model.int8.onnx").getAbsolutePath())
                 .setVoices(new File(dir, "voices.bin").getAbsolutePath())
@@ -309,6 +316,7 @@ public class KokoroEngine {
             if (it.isSpeak) {
                 generating = true;
                 aborted = false;
+                android.util.Log.i(DIAG_TAG, "gen start: chars=" + (it.text == null ? -1 : it.text.length()) + ", sid=" + it.sid);
                 final long myGen = it.gen;
                 final AudioTrack fAt = buildTrack(t.getSampleRate());
                 track = fAt;
@@ -372,18 +380,26 @@ public class KokoroEngine {
                 long stallMs = propLimit("kokoro.stall_ms", 30000);
                 long lastCount = -1L;
                 long lastProgress = genStart;
+                boolean firstLogged = false;
                 while (!genDone.get() && !aborted && myGen == generation) {
                     if (pcm[0] != lastCount) {
                         lastCount = pcm[0];
                         lastProgress = android.os.SystemClock.elapsedRealtime();
                     }
                     long stalledMs = android.os.SystemClock.elapsedRealtime() - lastProgress;
+                    if (gotAudio.get() && !firstLogged) {
+                        firstLogged = true;
+                        android.util.Log.i(DIAG_TAG, "first audio after "
+                                + (android.os.SystemClock.elapsedRealtime() - genStart) + " ms");
+                    }
                     if (!gotAudio.get() && stalledMs > firstMs) {
+                        android.util.Log.i(DIAG_TAG, "WATCHDOG: no first audio in " + firstMs + " ms - system TTS fallback");
                         LOG.e(new IllegalStateException("kokoro timeout: no audio within 60s"));
                         TTSEngine.get().onKokoroFailure();
                         break;
                     }
                     if (gotAudio.get() && stalledMs > stallMs) {
+                        android.util.Log.i(DIAG_TAG, "WATCHDOG: stream stalled " + stalledMs + " ms - system TTS fallback");
                         LOG.e(new IllegalStateException("kokoro timeout: audio stream stalled"));
                         TTSEngine.get().onKokoroFailure();
                         break;
@@ -411,6 +427,8 @@ public class KokoroEngine {
                     LOG.d(TAG, "kokoro gen", String.format("%.1f", genSec), "s for",
                             String.format("%.1f", audioSec), "s audio, RTF",
                             String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
+                    android.util.Log.i(DIAG_TAG, "gen done: " + pcm[0] + " samples, RTF "
+                            + String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
                 try { fAt.stop(); } catch (Throwable e) { }
                 try { fAt.release(); } catch (Throwable e) { }
@@ -423,6 +441,7 @@ public class KokoroEngine {
                         // zero samples = something failed silently - report an
                         // error so the session stops instead of paging silently
                         LOG.e(new IllegalStateException("kokoro item produced 0 samples"));
+                        android.util.Log.i(DIAG_TAG, "ZERO SAMPLES for sid=" + it.sid);
                         toastSafe("AI voice error: no audio for this text");
                         TTSEngine.get().fireKokoroError(it.utteranceId);
                     }
@@ -446,6 +465,65 @@ public class KokoroEngine {
             }
         } finally {
             generating = false;
+        }
+    }
+
+    public int getSampleRate() {
+        OfflineTts t = tts;
+        return t == null ? 0 : t.getSampleRate();
+    }
+
+    /**
+     * Diagnostics: synchronous generation outside the reading queue.
+     */
+    public GeneratedAudio generateForDiag(String text, int sid, float speed) throws Throwable {
+        OfflineTts t = tts;
+        if (t == null) {
+            throw new IllegalStateException("Kokoro engine is not ready");
+        }
+        return t.generate(text, sid, speed);
+    }
+
+    /**
+     * Diagnostics: plays the given PCM through the SAME AudioTrack path the
+     * reader uses and reports how far the hardware consumed it.
+     */
+    public String playForDiag(final float[] samples) {
+        OfflineTts t = tts;
+        if (t == null || samples == null || samples.length == 0) {
+            return "playback: no data to play";
+        }
+        AudioTrack at = null;
+        try {
+            at = buildTrack(t.getSampleRate());
+            at.play();
+            final int written = at.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
+            long start = android.os.SystemClock.elapsedRealtime();
+            int head = 0;
+            int lastHead = -1;
+            long lastMove = start;
+            while (android.os.SystemClock.elapsedRealtime() - lastMove < 800
+                    && android.os.SystemClock.elapsedRealtime() - start < 20000) {
+                Thread.sleep(100);
+                head = at.getPlaybackHeadPosition();
+                if (head != lastHead) {
+                    lastHead = head;
+                    lastMove = android.os.SystemClock.elapsedRealtime();
+                }
+                if (head >= written) {
+                    break;
+                }
+            }
+            long ms = android.os.SystemClock.elapsedRealtime() - start;
+            return "playback: written=" + written + " frames, hardware played " + head
+                    + " frames (" + (written > 0 ? 100 * head / written : 0) + "%) in " + ms + " ms";
+        } catch (Throwable e) {
+            return "playback: PLAYBACK ERROR: " + e;
+        } finally {
+            if (at != null) {
+                try { at.stop(); } catch (Throwable e) { }
+                try { at.release(); } catch (Throwable e) { }
+            }
         }
     }
 

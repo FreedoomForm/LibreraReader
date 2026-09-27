@@ -702,5 +702,12 @@
     <string name="tts_kokoro_on">AI voice (Kokoro): ON</string>
     <string name="tts_kokoro_off">AI voice (Kokoro): OFF</string>
     <string name="tts_kokoro_init">Preparing offline AI voice\u2026</string>
+    <string name="tts_diag_title">TTS diagnostics</string>
+    <string name="tts_diag_run">Run test</string>
+    <string name="tts_diag_copy">Copy report</string>
+    <string name="tts_diag_share">Share report</string>
+    <string name="tts_diag_copied">Report copied</string>
+    <string name="tts_diag_hint">If the AI voice is silent: press Play in the book, wait a minute, then run this test and send the report to the developer (Copy button).</string>
+    <string name="tts_system_init_failed">System TTS engine failed to start - check the text-to-speech settings of your device</string>
     <string name="tts_continues_in_background">Reading continues in the background - tap the notification to return</string>
 </resources>

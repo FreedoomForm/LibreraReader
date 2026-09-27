@@ -931,6 +931,21 @@ public class DragingDialogs {
                         openKokoroVoicePicker.run();
                     }
                 });
+                final TextView ttsDiag = view.findViewById(R.id.ttsDiag);
+                final TextView ttsDiagNote = view.findViewById(R.id.ttsDiagNote);
+                if (TTSEngine.kokoroFallbackActive) {
+                    ttsDiagNote.setText(R.string.tts_kokoro_fallback);
+                }
+                TxtUtils.underlineTextView(ttsDiag);
+                ttsDiag.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        try {
+                            activity.startActivity(new Intent(activity, com.foobnix.tts.TtsDiagnosticsActivity.class));
+                        } catch (Exception e) {
+                            LOG.e(e);
+                        }
+                    }
+                });
 
 
                 final TextView timerTime = view.findViewById(R.id.timerTime);

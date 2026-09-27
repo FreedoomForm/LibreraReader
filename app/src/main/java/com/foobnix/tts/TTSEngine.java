@@ -454,12 +454,25 @@ public class TTSEngine {
                     } catch (InterruptedException e) {
                     }
                     speek(text);
+                } else {
+                    // a dead system engine used to fail silently: no sound, no message
+                    LOG.e(new IllegalStateException("system TTS init failed: " + status));
+                    android.util.Log.i("KokoroDiag", "system TTS init FAILED, status=" + status);
+                    try {
+                        Toast.makeText(LibreraApp.context, R.string.tts_system_init_failed, Toast.LENGTH_LONG).show();
+                    } catch (Throwable t) {
+                    }
                 }
             }
         });
 
         if (ttsEngine == null) {
             LOG.d(TAG, "speek: no TTS engine available");
+            android.util.Log.i("KokoroDiag", "speek: no TTS engine available at all");
+            try {
+                Toast.makeText(LibreraApp.context, R.string.tts_system_init_failed, Toast.LENGTH_LONG).show();
+            } catch (Throwable t) {
+            }
             return;
         }
 
