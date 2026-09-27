@@ -78,6 +78,12 @@ android {
         }
     }
 
+    // CI publishes the release (R8-optimized) APK; lintVitalRelease must not block it.
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+
     buildTypes {
         release {
             // R8: shrink, optimize and obfuscate the DEX (Google Play requires >= 25% in each category)

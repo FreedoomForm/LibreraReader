@@ -106,8 +106,36 @@ public class LibreraApp extends Application {
             // Warm up the offline AI voice in the background so that pressing
             // Play starts speaking immediately instead of waiting seconds for
             // the Kokoro model to initialize on the first playback.
+            // The ONNX runtime keeps the model (~250 MB) resident for the whole
+            // session, so an eager warm-up at startup means GC pressure on every
+            // UI interaction - buttons lag even when TTS is never opened. Warm up
+            // only after the UI has settled, and skip it entirely on low-RAM
+            // devices (there the lazy path in TTSEngine prepares the engine on
+            // the first Play press).
+            final android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            boolean lowRamDevice = false;
+            if (am != null) {
+                android.app.ActivityManager.MemoryInfo mem = new android.app.ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mem);
+                lowRamDevice = mem.totalMem < 4L * 1024 * 1024 * 1024;
+            }
             if (AppState.get().ttsUseKokoro) {
-                KokoroEngine.get().prepareAsync(null, true);
+                if (lowRamDevice) {
+                    LOG.d("LibreraApp", "low-RAM device: Kokoro warm-up deferred to first TTS use");
+                } else {
+                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                        public void run() {
+                            try {
+                                if (AppState.get().ttsUseKokoro && !KokoroEngine.get().isReady()) {
+                                    KokoroEngine.get().prepareAsync(null, true);
+                                }
+                            } catch (Throwable t) {
+                                LOG.e(t);
+                            }
+                        }
+                    }, 15000);
+                }
             }
         } catch (Throwable t) {
             LOG.e(t);

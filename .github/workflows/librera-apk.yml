@@ -24,7 +24,7 @@ jobs:
       - name: Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Dummy release signing properties (CI-only; debug build never uses them)
+      - name: Dummy release signing properties (CI-only; used by the release buildType)
         run: |
           cat >> gradle.properties <<'PROPS'
           RELEASE_STORE_FILE=dummy-release.jks
@@ -68,7 +68,7 @@ jobs:
           tts_reader_admobRewardId=
           PROPS
 
-      - name: Dummy google-services.json (CI-only, fdroid debug build)
+      - name: Dummy google-services.json (CI-only, fdroid release build)
         run: |
           cat > app/google-services.json <<'GSJ'
           {
@@ -153,10 +153,10 @@ jobs:
             ls -la "$DST/"
           done
 
-      - name: Build APK (fdroid flavor, debug)
+      - name: Build APK (fdroid flavor, release-optimized R8)
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleFdroidDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleFdroidRelease --no-daemon --stacktrace
 
       - name: Verify APK contents + JNI symbols
         run: |

@@ -93,3 +93,9 @@
 # resolve on older systems: NoClassDefFoundError at register() and a crash on launch.
 -keepnames class androidx.** extends android.app.Activity
 -keepnames class androidx.fragment.app.Fragment
+
+# sherpa-onnx JNI (libsherpa-onnx-jni.so) finds these classes and their fields
+# by exact name (RegisterNatives / GetFieldID on OfflineTts, OfflineTtsConfig,
+# GeneratedAudio, ...). Renaming any of them breaks OfflineTts init with
+# UnsatisfiedLinkError / NoSuchFieldError in release builds.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
