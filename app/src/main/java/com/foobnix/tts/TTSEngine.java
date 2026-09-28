@@ -1109,7 +1109,7 @@ public class TTSEngine {
                         break;
                     }
                     if (wordMode) {
-                        enqueueWordsRealtime(kok, big, i, sid, speed, align);
+                        enqueueSentencesRealtime(kok, big, i, sid, speed, align);
                     } else {
                         kok.enqueueSpeak(big, FINISHED_SIGNAL + i, sid, speed);
                         kok.enqueueSilence(AppState.get().ttsPauseDuration, "Temp", sid, speed);
@@ -1122,7 +1122,7 @@ public class TTSEngine {
             LOG.d("kokoro pageHTML-parts-single");
             final String clean = text.replace(TxtUtils.TTS_PAUSE, "");
             if (wordMode) {
-                enqueueWordsRealtime(kok, clean, -1, sid, speed, align);
+                enqueueSentencesRealtime(kok, clean, -1, sid, speed, align);
                 kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
             } else {
                 kok.enqueueSpeak(clean, UTTERANCE_ID_DONE, sid, speed);
@@ -1207,26 +1207,130 @@ public class TTSEngine {
     }
 
     /**
-     * Real-time word-by-word reading: every word becomes its own tiny
-     * utterance. A one-word clip synthesizes in tens of milliseconds, so the
-     * AI voice starts speaking almost instantly after Play and long sentences
-     * (the historical Kokoro hang) never reach the synthesizer at once.
-     * The utterance id "ttsW<flatIdx>" lets the reader view highlight the
-     * word while it is spoken.
+     * Real-time reading with the AI voice at SENTENCE granularity: the
+     * paragraph is split into short sentence chunks (ONE Kokoro call each,
+     * not one call per word - word-level calls paid the full model overhead
+     * per token and read at a crawl on mid-range phones). Every chunk carries
+     * its word list + flat page indices; the engine estimates each word's
+     * audio offset inside the clip and fires "ttsW<idx>" highlight events as
+     * the playhead passes the word - the same protocol as before.
      */
-    private void enqueueWordsRealtime(final KokoroEngine kok, final String paragraph, final int paragraphIndex,
-                                      final int sid, final float speed, final WordAlign align) {
-        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
-        forEachWordToken(paragraph, align, new WordSink() {
-            @Override public void accept(final String word, final int flat) {
-                kok.enqueueSpeak(word, WORD_SIGNAL + flat, sid, speed);
-                kok.enqueueSilence(wordPauseMs, "Temp", sid, speed);
+    private void enqueueSentencesRealtime(final KokoroEngine kok, final String paragraph, final int paragraphIndex,
+                                          final int sid, final float speed, final WordAlign align) {
+        for (final String chunk : splitSentenceChunks(paragraph)) {
+            final java.util.List<String> words = new java.util.ArrayList<String>();
+            final java.util.List<Integer> flats = new java.util.ArrayList<Integer>();
+            final java.util.List<Float> weights = new java.util.ArrayList<Float>();
+            forEachWordToken(chunk, align, new WordSink() {
+                @Override public void accept(final String word, final int flat) {
+                    words.add(word);
+                    flats.add(flat);
+                    weights.add(wordWeight(word));
+                }
+            });
+            if (!words.isEmpty()) {
+                final float[] w = new float[weights.size()];
+                for (int k = 0; k < w.length; k++) {
+                    w[k] = weights.get(k);
+                }
+                kok.enqueueSpeakWords(chunk.trim(), words.toArray(new String[words.size()]),
+                        toIntArray(flats), w, WORD_SIGNAL_CLIP, sid, speed);
             }
-        });
+        }
         if (paragraphIndex >= 0) {
             // keep the resume protocol: paragraph i finished
             kok.enqueueSilence(0, FINISHED_SIGNAL + paragraphIndex, sid, speed);
         }
+    }
+
+    /** utterance id of a sentence clip that carries its own word list */
+    private static final String WORD_SIGNAL_CLIP = "ttsClip";
+
+    private static int[] toIntArray(final java.util.List<Integer> list) {
+        final int[] a = new int[list.size()];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = list.get(i);
+        }
+        return a;
+    }
+
+    /** Maximum text length of one real-time synthesis chunk. */
+    private static final int TTS_CHUNK_MAX = 220;
+    /** chunks shorter than this keep absorbing the next sentence to cut the
+     *  number of synthesis calls (each call has fixed model overhead) */
+    private static final int TTS_CHUNK_MIN = 60;
+
+    /**
+     * Splits a paragraph into short sentence chunks for real-time synthesis:
+     * long enough to amortize the per-call model overhead, short enough to
+     * start within a couple of seconds of Play. Long punctuation-less text is
+     * hard-wrapped on whitespace.
+     */
+    static java.util.List<String> splitSentenceChunks(final String text) {
+        final java.util.List<String> out = new java.util.ArrayList<String>();
+        if (TxtUtils.isEmpty(text)) {
+            return out;
+        }
+        final StringBuilder cur = new StringBuilder();
+        final int len = text.length();
+        for (int i = 0; i < len; i++) {
+            final char ch = text.charAt(i);
+            cur.append(ch);
+            final boolean sentenceEnd = (ch == '.' || ch == '!' || ch == '?' || ch == '…')
+                    && (i + 1 >= len || Character.isWhitespace(text.charAt(i + 1)) || isCloser(text.charAt(i + 1)));
+            if (sentenceEnd && cur.length() >= TTS_CHUNK_MIN) {
+                out.add(cur.toString().trim());
+                cur.setLength(0);
+            } else if (cur.length() >= TTS_CHUNK_MAX) {
+                int cut = -1;
+                for (int j = cur.length() - 1; j > TTS_CHUNK_MIN && cut < 0; j--) {
+                    final char c = cur.charAt(j);
+                    if (c == ' ' || c == ',' || c == ';' || c == ':') {
+                        cut = j;
+                    }
+                }
+                if (cut < 0) {
+                    cut = cur.length();
+                }
+                out.add(cur.substring(0, cut).trim());
+                cur.delete(0, cut);
+            }
+        }
+        final String tail = cur.toString().trim();
+        if (tail.length() > 0) {
+            // merge a tiny tail into the previous chunk instead of a solo call
+            if (!out.isEmpty() && tail.length() < TTS_CHUNK_MIN
+                    && out.get(out.size() - 1).length() + tail.length() + 1 <= TTS_CHUNK_MAX + 40) {
+                out.set(out.size() - 1, out.get(out.size() - 1) + " " + tail);
+            } else {
+                out.add(tail);
+            }
+        }
+        return out;
+    }
+
+    private static boolean isCloser(final char c) {
+        return c == '"' || c == '\'' || c == ')' || c == ']' || c == '»' || c == '”';
+    }
+
+    /**
+     * Relative audio duration of one spoken token for the highlight
+     * estimator: its letter count plus a pause bonus for trailing
+     * punctuation.
+     */
+    static float wordWeight(final String word) {
+        final String norm = normalizeWord(word);
+        float w = Math.max(2, Math.min(norm.length(), 24));
+        final String t = word.trim();
+        if (t.length() > 0) {
+            final char last = t.charAt(t.length() - 1);
+            if (last == '.' || last == '!' || last == '?' || last == '…') {
+                w += 8;
+            } else if (last == ',' || last == ';' || last == ':') {
+                w += 4;
+            }
+        }
+        return w;
     }
 
     /**

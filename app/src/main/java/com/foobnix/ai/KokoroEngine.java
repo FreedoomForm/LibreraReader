@@ -55,6 +55,14 @@ public class KokoroEngine {
         /** TTSEngine word-list epoch at enqueue time: highlight events from an
          *  older page are dropped instead of marking the wrong page */
         long epoch;
+        /** sentence clip: the words it contains (parallel arrays, null for a
+         *  plain utterance). Word highlights are estimated inside the clip and
+         *  fired from the playhead - ONE synthesis call per sentence instead of
+         *  one per word, which used to pay the full model overhead per word and
+         *  read at a crawl on mid-range phones. */
+        String[] words;
+        int[] flats;
+        float[] weights;
     }
 
     private volatile OfflineTts tts;
@@ -70,9 +78,6 @@ public class KokoroEngine {
     /** frames written into the current track since it was created (for pacing) */
     private final java.util.concurrent.atomic.AtomicLong writtenFrames =
             new java.util.concurrent.atomic.AtomicLong(0);
-    /** generation may never run more than this far ahead of the playhead:
-     *  bounds both the highlight lag and the audio lost on Stop */
-    private static final long MAX_LEAD_MS = 600;
     /** upper bound for waiting until the playhead drains the buffer */
     private static final long BARRIER_TIMEOUT_MS = 10000;
     /** if the playhead does not move for this long while we are pacing, the
@@ -84,6 +89,15 @@ public class KokoroEngine {
             new java.util.concurrent.atomic.AtomicInteger(0);
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
+    /** fires the per-word highlight events of sentence clips from the playhead */
+    private final java.util.concurrent.ScheduledExecutorService highlightExec =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(new java.util.concurrent.ThreadFactory() {
+                public Thread newThread(final Runnable r) {
+                    final Thread t = new Thread(r, "kokoro-highlight");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
     private final java.util.List<Runnable> pendingOnReady = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
 
     public boolean isReady() {
@@ -177,10 +191,10 @@ public class KokoroEngine {
                         + new File(dir, "lexicon-gb-en.txt").getAbsolutePath() + ","
                         + new File(dir, "lexicon-zh.txt").getAbsolutePath())
                 .build();
-        // synthesis is the heavy part: use as many cores as we can spare while
-        // keeping the rest for the UI (2 threads on a 4-core phone, 4 on 8-core+)
+        // synthesis is the heavy part: give ONNX as many cores as we can spare
+        // (all but one on big phones; 2 on a weak 4-core device)
         int cores = Runtime.getRuntime().availableProcessors();
-        int onnxThreads = Math.max(2, Math.min(4, cores / 2));
+        int onnxThreads = Math.max(2, Math.min(6, cores - 1));
         LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
         OfflineTtsModelConfig m = OfflineTtsModelConfig.builder()
                 .setKokoro(k)
@@ -234,6 +248,25 @@ public class KokoroEngine {
         Item it = new Item();
         it.isSpeak = true;
         it.text = text;
+        it.utteranceId = utteranceId;
+        it.sid = sid;
+        it.speed = speed;
+        enqueue(it);
+    }
+
+    /**
+     * A sentence clip that carries its own word list: after synthesis the
+     * engine maps every word to a playhead frame (by character weight) and
+     * fires "ttsW<flatIdx>" highlight events exactly when the word is heard.
+     */
+    public void enqueueSpeakWords(final String text, final String[] words, final int[] flats,
+            final float[] weights, final String utteranceId, final int sid, final float speed) {
+        Item it = new Item();
+        it.isSpeak = true;
+        it.text = text;
+        it.words = words;
+        it.flats = flats;
+        it.weights = weights;
         it.utteranceId = utteranceId;
         it.sid = sid;
         it.speed = speed;
@@ -409,36 +442,37 @@ public class KokoroEngine {
         }
     }
 
+    /** playhead freeze detector for the head-less sink escape */
+    private static final class HeadWatch {
+        long lastHead;
+        long lastMove;
+    }
+
+    private HeadWatch newHeadWatch(final AudioTrack at) {
+        final HeadWatch hw = new HeadWatch();
+        hw.lastHead = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        hw.lastMove = android.os.SystemClock.elapsedRealtime();
+        return hw;
+    }
+
     /**
-     * Paces generation: blocks until at most {@code thresholdMs} of audio is
-     * still buffered ahead of the playhead. Escapes when the playhead is not
-     * moving at all (emulator/CI audio sinks never consume): the buffer is
-     * flushed so the session keeps going instead of deadlocking.
+     * Escapes the head-less audio sink trap: when nothing consumes the stream
+     * (emulator started with -noaudio, CI), WRITE_BLOCKING would block forever
+     * once the buffer fills. The buffer is flushed so generation continues;
+     * real phones never hit this because the playhead always moves.
      */
-    private void paceToLead(final AudioTrack at, final int sampleRate, final long thresholdMs, final long myGen) {
-        if (at == null) {
+    private void headlessEscape(final AudioTrack at, final int sampleRate, final HeadWatch hw) {
+        final long now = android.os.SystemClock.elapsedRealtime();
+        final long head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        if (head != hw.lastHead) {
+            hw.lastHead = head;
+            hw.lastMove = now;
             return;
         }
-        long lastHead = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
-        long lastMove = android.os.SystemClock.elapsedRealtime();
-        while (!aborted && myGen == generation) {
-            if (leadMs(at, sampleRate) <= thresholdMs) {
-                return;
-            }
-            final long now = android.os.SystemClock.elapsedRealtime();
-            final long head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
-            if (head != lastHead) {
-                lastHead = head;
-                lastMove = now;
-            } else if (now - lastMove > FROZEN_HEAD_MS) {
-                drainSink(at);
-                return;
-            }
-            try {
-                Thread.sleep(15);
-            } catch (InterruptedException e) {
-                return;
-            }
+        // frozen for a while AND at least a second of audio stacked up
+        if (now - hw.lastMove > FROZEN_HEAD_MS && writtenFrames.get() - head > sampleRate) {
+            drainSink(at);
+            hw.lastMove = android.os.SystemClock.elapsedRealtime();
         }
     }
 
@@ -478,8 +512,112 @@ public class KokoroEngine {
         }, delayMs);
     }
 
+    /**
+     * Fires the per-word highlight events ("ttsW<flatIdx>") for one sentence
+     * clip. Word offsets are estimated from character weights inside the clip
+     * and mapped to playhead frames; a 50 ms ticker compares the hardware
+     * playhead with each word's frame and fires exactly when the user HEARS
+     * the word. On head-less sinks (emulator without audio) the playhead never
+     * moves - the remaining words are fired sequentially so the highlight
+     * chain stays observable and CI can assert it.
+     */
+    private void scheduleWordHighlights(final AudioTrack at, final int sampleRate, final long myGen,
+            final Item it, final long startFrame, final long totalSamples) {
+        final int n = it.words.length;
+        if (n == 0 || totalSamples <= 0) {
+            return;
+        }
+        float totalW = 0;
+        for (final float w : it.weights) {
+            totalW += w;
+        }
+        if (totalW <= 0) {
+            totalW = n;
+            for (int k = 0; k < n; k++) {
+                it.weights[k] = 1;
+            }
+        }
+        final long[] frames = new long[n];
+        float cum = 0;
+        for (int k = 0; k < n; k++) {
+            cum += it.weights[k];
+            frames[k] = startFrame + (long) ((cum / totalW) * totalSamples);
+        }
+        final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger(0);
+        final long[] headState = {at.getPlaybackHeadPosition() & 0xFFFFFFFFL,
+                android.os.SystemClock.elapsedRealtime()};
+        final java.util.concurrent.ScheduledFuture<?>[] self = new java.util.concurrent.ScheduledFuture[1];
+        android.util.Log.i(DIAG_TAG, "highlight schedule: " + n + " words, clip " + totalSamples
+                + " frames from " + startFrame);
+        self[0] = highlightExec.scheduleWithFixedDelay(new Runnable() {
+            public void run() {
+                try {
+                    if (aborted || myGen != generation) {
+                        self[0].cancel(false);
+                        return;
+                    }
+                    long head;
+                    try {
+                        head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+                    } catch (Throwable e) {
+                        // the track was released while words were pending
+                        // (head-less sink drains early) - play the rest out
+                        fireRemaining(it, frames, next, n);
+                        self[0].cancel(false);
+                        return;
+                    }
+                    int i = next.get();
+                    while (i < n && frames[i] <= head) {
+                        fireWord(it, i);
+                        i++;
+                    }
+                    next.set(i);
+                    if (i >= n) {
+                        self[0].cancel(false);
+                        return;
+                    }
+                    final long now = android.os.SystemClock.elapsedRealtime();
+                    if (head != headState[0]) {
+                        headState[0] = head;
+                        headState[1] = now;
+                    } else if (now - headState[1] > FROZEN_HEAD_MS) {
+                        // nothing consumes the stream (emulator/CI audio sink):
+                        // fire the remaining words in order, do not stall
+                        fireRemaining(it, frames, next, n);
+                        self[0].cancel(false);
+                    }
+                } catch (Throwable t) {
+                    LOG.e(t);
+                    self[0].cancel(false);
+                }
+            }
+        }, 50, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void fireRemaining(final Item it, final long[] frames,
+            final java.util.concurrent.atomic.AtomicInteger next, final int n) {
+        final int from = next.get();
+        for (int k = from; k < n; k++) {
+            fireWord(it, k);
+        }
+        next.set(n);
+        android.util.Log.i(DIAG_TAG, "highlight: fired remaining " + (n - from) + "/" + n
+                + " words without a moving playhead (head-less sink)");
+    }
+
+    private void fireWord(final Item it, final int k) {
+        if (it.flats[k] < 0) {
+            return; // carried over from the previous page / unmatched - nothing to mark
+        }
+        if (TTSEngine.get().getTTSWordEpoch() != it.epoch) {
+            return; // the page changed while the clip was in flight
+        }
+        TTSEngine.get().fireKokoroStart(TTSEngine.WORD_SIGNAL + it.flats[k]);
+    }
+
     /** a chunk of true silence written into the audio stream */
-    private void writeSilence(final AudioTrack at, final int sampleRate, final long ms, final long myGen) {
+    private void writeSilence(final AudioTrack at, final int sampleRate, final long ms, final long myGen,
+            final HeadWatch hw) {
         if (at == null || ms <= 0) {
             return;
         }
@@ -488,12 +626,19 @@ public class KokoroEngine {
         while (left > 0 && !aborted && myGen == generation) {
             final int n = (int) Math.min(left, zeros.length);
             try {
-                final int written = at.write(zeros, 0, n, AudioTrack.WRITE_BLOCKING);
-                if (written > 0) {
-                    writtenFrames.addAndGet(written);
-                } else {
-                    break;
+                headlessEscape(at, sampleRate, hw);
+                int off = 0;
+                while (off < n) {
+                    final int written = at.write(zeros, off, n - off, AudioTrack.WRITE_NON_BLOCKING);
+                    if (written > 0) {
+                        off += written;
+                        writtenFrames.addAndGet(written);
+                    } else {
+                        Thread.sleep(20);
+                    }
                 }
+            } catch (InterruptedException e) {
+                break;
             } catch (Throwable e) {
                 break;
             }
@@ -526,20 +671,21 @@ public class KokoroEngine {
                     TTSEngine.get().fireKokoroError(it.utteranceId);
                     return;
                 }
-                // real-time pacing: do not let generation run more than
-                // MAX_LEAD_MS ahead of what the user is hearing right now
-                paceToLead(fAt, sampleRate, MAX_LEAD_MS, myGen);
-                if (aborted || myGen != generation) {
-                    return;
-                }
+                // No explicit pacing gate: the WRITE_BLOCKING callback write
+                // already self-paces generation to the audio buffer (6 s), which
+                // keeps the speech gap-free instead of throttling it to 600 ms
+                // ahead of the playhead. The old explicit gate was one of the
+                // reasons word-level sessions crawled.
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 final java.util.concurrent.atomic.AtomicBoolean genDone =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
-                /** fires the highlight event exactly once, at the first written chunk */
+                /** frame index of the clip's first sample, captured at first write */
+                final long[] itemStartFrame = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean startFired =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
+                final HeadWatch watch = newHeadWatch(fAt);
                 final long genStart = android.os.SystemClock.elapsedRealtime();
                 // Run the native synthesis on a DEDICATED thread: a stuck generate
                 // (espeak infinite loop on exotic text) must never block the shared
@@ -553,20 +699,42 @@ public class KokoroEngine {
                                         return 0;
                                     }
                                     try {
-                                        // highlight when the sound is actually heard,
-                                        // delayed by whatever is still buffered
+                                        // frame index where this clip's audio starts in
+                                        // the stream (word highlights are mapped from here)
                                         if (startFired.compareAndSet(false, true)) {
-                                            fireStartAt(it.utteranceId,
-                                                    Math.min(leadMs(fAt, sampleRate), 1000), myGen, it.epoch);
+                                            itemStartFrame[0] = writtenFrames.get();
+                                            if (it.words == null) {
+                                                // plain utterance: fire its start event
+                                                // delayed by whatever is still buffered
+                                                fireStartAt(it.utteranceId,
+                                                        Math.min(leadMs(fAt, sampleRate), 1000), myGen, it.epoch);
+                                            }
                                         }
-                                        final int written = fAt.write(samples, 0, samples.length,
-                                                AudioTrack.WRITE_BLOCKING);
-                                        if (written <= 0) {
-                                            return 0;
+                                        headlessEscape(fAt, sampleRate, watch);
+                                        // NON_BLOCKING + retry loop: generation can
+                                        // never wedge inside a blocking write on a
+                                        // head-less sink (CI emulator), and the
+                                        // escape/watchdog keep making progress
+                                        int off = 0;
+                                        while (off < samples.length) {
+                                            if (aborted || myGen != generation) {
+                                                return 0;
+                                            }
+                                            final int w = fAt.write(samples, off, samples.length - off,
+                                                    AudioTrack.WRITE_NON_BLOCKING);
+                                            if (w > 0) {
+                                                off += w;
+                                                pcm[0] += w;
+                                                writtenFrames.addAndGet(w);
+                                                gotAudio.set(true);
+                                            } else {
+                                                try {
+                                                    Thread.sleep(20);
+                                                } catch (InterruptedException e) {
+                                                    return 0;
+                                                }
+                                            }
                                         }
-                                        pcm[0] += written;
-                                        writtenFrames.addAndGet(written);
-                                        gotAudio.set(true);
                                     } catch (Throwable e) {
                                         return 0;
                                     }
@@ -643,6 +811,11 @@ public class KokoroEngine {
                     android.util.Log.i(DIAG_TAG, "gen done: " + pcm[0] + " samples, RTF "
                             + String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
+                // schedule this sentence clip's word highlights: the ticker maps
+                // every word to a playhead frame and fires it when it is heard
+                if (it.words != null && pcm[0] > 0) {
+                    scheduleWordHighlights(fAt, sampleRate, myGen, it, itemStartFrame[0], pcm[0]);
+                }
                 // keep the track playing for the next item; release it only when
                 // nothing else is queued and the tail has actually played out
                 if (queue.isEmpty()) {
@@ -687,7 +860,6 @@ public class KokoroEngine {
                     // phrases at once"). Skipped when we are behind anyway (RTF>1
                     // device - no extra gap on top of the synthesis lag).
                     if (at != null) {
-                        paceToLead(at, sampleRate, MAX_LEAD_MS, myGen);
                         if (leadMs(at, sampleRate) > 40) {
                             try {
                                 if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
@@ -696,7 +868,7 @@ public class KokoroEngine {
                             } catch (Throwable e) {
                                 LOG.e(e);
                             }
-                            writeSilence(at, sampleRate, it.silenceMs, myGen);
+                            writeSilence(at, sampleRate, it.silenceMs, myGen, newHeadWatch(at));
                         }
                     }
                 } else if (at != null) {
@@ -790,9 +962,10 @@ public class KokoroEngine {
         if (minBuf <= 0) {
             minBuf = 16384;
         }
-        // float PCM is 4 bytes per frame: 2.5 s is plenty because generation
-        // is paced to stay MAX_LEAD_MS ahead of the playhead
-        int buf = Math.max(minBuf, (int) (sampleRate * 2.5f * 4));
+        // float PCM is 4 bytes per frame: a 6 s buffer absorbs generation jitter
+        // on slow devices (WRITE_BLOCKING self-paces generation into it), which
+        // is what keeps the speech gap-free instead of "speaks, then pauses"
+        int buf = Math.max(minBuf, (int) (sampleRate * 6f * 4));
         return new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
