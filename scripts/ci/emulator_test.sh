@@ -28,9 +28,9 @@ adb install -r "$APK" || exit 1
 # reflection; R8 silently stripping them killed ALL event-driven UI in the
 # release APK (word highlight included) while everything still compiled and
 # the app ran. The proguard rules keep the original method names, so the
-# presence of "onTTSWord" in classes.dex is a deterministic release-health
+# presence of "onTTSWord" in the dex pool is a deterministic release-health
 # check that catches any future keep-rule regression at CI time.
-if unzip -p "$APK" classes.dex 2>/dev/null | grep -aq "onTTSWord"; then
+if unzip -p "$APK" 'classes*.dex' 2>/dev/null | grep -aq "onTTSWord"; then
   echo "EVENTBUS SUBSCRIBERS PRESENT in release dex (R8 keep rules active)"
 else
   echo "::error::R8 STRIPPED @Subscribe METHODS - EventBus keep rules missing in proguard-rules.pro"
@@ -73,11 +73,16 @@ if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
 # ---------- 1b. Open a real book (reader activity registers EventBus
 # subscribers; the word-highlight DRAW path lives there). Without this the
 # service posts MessageTTSWord into the void and CI cannot see the break
-# that users see. The library grid shows the first book card at
-# [11,382][349,1059] on the pixel_6 profile - tap its center.
+# that users see. OpenerActivity handles VIEW intents, so the book is opened
+# directly by path - the library tap was once eaten by a launcher ANR dialog
+# that the emulator image itself showed. The app ships sample EPUBs in
+# files/TempDownloads/ on first run, so the path always exists.
 echo "Opening a real book so the reader (and its highlight subscriber) is up..."
-adb shell input tap 180 720 || true
+adb shell am start -a android.intent.action.VIEW \
+  -d "file:///storage/emulated/0/Android/data/$PKG/files/TempDownloads/montecristo.epub" \
+  -t "application/epub+zip" || true
 sleep 25
+adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "ResumedActivity" || true
 adb shell uiautomator dump /sdcard/ui-reader.xml || true
 adb pull /sdcard/ui-reader.xml ui-reader.xml || true
 if [ -f ui-reader.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui-reader.xml | head -8; fi
