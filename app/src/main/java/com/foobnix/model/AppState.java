@@ -412,10 +412,17 @@ public class AppState {
     // Offline AI TTS (Kokoro-82M, bundled in the APK)
     public volatile boolean ttsUseKokoro = true;
     public volatile String ttsKokoroVoice = "af_heart";
-    // Real-time reading: one word per utterance (short clips synthesize almost
-    // instantly, so the AI voice starts talking right after Play and long
-    // sentences never reach the synthesizer at once)
-    public volatile boolean ttsWordMode = true;
+    // Selected voice of the system TextToSpeech engine (Voice.getName(),
+    // "" = the engine's default voice). Each engine type offers its own list.
+    public volatile String ttsSystemVoice = "";
+    // Custom voice profile (recorded in the app or imported from an MP3 file),
+    // file name inside filesDir/tts_voices ("" = no filter). The voice filter
+    // shifts the pitch of the CURRENT engine voice towards the recorded one.
+    public volatile String ttsCustomVoice = "";
+    // Word-by-word reading was removed at the user's request: both engines now
+    // read continuously and only drive the word highlight. The flag is kept
+    // (always false) so old settings files load without errors.
+    @Deprecated public volatile boolean ttsWordMode = false;
     // Highlight the word that is currently being spoken on the book page
     public volatile boolean ttsWordHighlight = true;
     @IgnoreHashCode public boolean isEnalbeTTSReplacements = true;

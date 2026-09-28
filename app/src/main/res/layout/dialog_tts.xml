@@ -133,11 +133,21 @@
             android:layout_height="wrap_content"
             android:gravity="center_vertical">
 
-            <androidx.appcompat.widget.SwitchCompat
-                android:id="@+id/ttsWordModeSwitch"
-                android:layout_width="match_parent"
+            <TextView
+                android:id="@+id/ttsSystemVoice"
+                style="@style/textLink"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/tts_word_mode_title" />
+                android:minWidth="110dip"
+                android:text="@string/voice" />
+
+            <TextView
+                android:id="@+id/ttsSystemVoiceValue"
+                android:lines="1"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/empy" />
         </LinearLayout>
 
         <LinearLayout

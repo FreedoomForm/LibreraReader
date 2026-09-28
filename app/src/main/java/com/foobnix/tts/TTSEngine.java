@@ -73,6 +73,13 @@ public class TTSEngine {
     Object helpObject = new Object();
     HashMap<String, String> map = new HashMap<String, String>();
     HashMap<String, String> mapTemp = new HashMap<String, String>();
+    /** char start of every readable token + its flat page word index per
+     *  utterance id - used by onRangeStart to highlight the word being
+     *  spoken in continuous (not word-by-word) reading with the system voice */
+    private final java.util.Map<String, int[][]> ttsRangeIndex =
+            new java.util.concurrent.ConcurrentHashMap<String, int[][]>();
+    /** true after the system engine reported a successful init */
+    private volatile boolean systemTtsReady = false;
 
     public boolean isInit() {
         return ttsEngine != null;
@@ -82,6 +89,7 @@ public class TTSEngine {
 
         @Override public void onInit(int status) {
             LOG.d(TAG, "onInit", "SUCCESS", status == TextToSpeech.SUCCESS);
+            systemTtsReady = status == TextToSpeech.SUCCESS;
             if (status == TextToSpeech.ERROR) {
                 Toast.makeText(LibreraApp.context, R.string.msg_unexpected_error, Toast.LENGTH_LONG)
                      .show();
@@ -265,6 +273,10 @@ public class TTSEngine {
         stop(null);
     }
 
+    public boolean isSystemTtsReady() {
+        return systemTtsReady && ttsEngine != null;
+    }
+
     @TargetApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH_MR1) public void stop(MediaSessionCompat mediaSessionCompat) {
         if (mediaSessionCompat != null) {
             mediaSessionCompat.setActive(false);
@@ -280,6 +292,7 @@ public class TTSEngine {
 
         LOG.d(TAG, "stop");
         kokoroPlaySeq.incrementAndGet();
+        ttsRangeIndex.clear();
         if (AppState.get().ttsUseKokoro) {
             try {
                 KokoroEngine.get().stopInternal();
@@ -313,6 +326,8 @@ public class TTSEngine {
         LOG.d(TAG, "stop");
         TxtUtils.dictHash = "";
         kokoroPlaySeq.incrementAndGet();
+        ttsRangeIndex.clear();
+        systemTtsReady = false;
         try {
             if (AppState.get().ttsUseKokoro) {
                 // keep the AI model warm in memory: the next Play must start
@@ -543,6 +558,9 @@ public class TTSEngine {
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP) private void speekLocked(final String text) {
         this.text = text;
+        // utterance ids repeat from page to page - drop the previous page's
+        // word offsets so onRangeStart can never highlight a stale word
+        ttsRangeIndex.clear();
 
         if (AppSP.get().tempBookPage != AppSP.get().lastBookPage) {
             AppSP.get().tempBookPage = AppSP.get().lastBookPage;
@@ -572,6 +590,7 @@ public class TTSEngine {
             @Override public void onInit(int status) {
                 LOG.d("getTTS-status", status);
                 if (status == TextToSpeech.SUCCESS) {
+                    systemTtsReady = true;
                     try {
                         Thread.sleep(1000);
                     } catch (InterruptedException e) {
@@ -599,7 +618,9 @@ public class TTSEngine {
             return;
         }
 
-        ttsEngine.setPitch(AppState.get().ttsPitch);
+        // selected system voice + custom voice filter pitch (safe to call
+        // before the engine finishes init: the params are applied on connect)
+        applyVoiceSettings();
         if (AppState.get().ttsSpeed == 0.0f) {
             AppState.get().ttsSpeed = 0.01f;
         }
@@ -611,12 +632,10 @@ public class TTSEngine {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
             ttsEngine.playSilence(0l, TextToSpeech.QUEUE_FLUSH, mapTemp);
             final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
-            if (AppState.get().ttsWordMode) {
-                // resuming mid-page: skip the words of the paragraphs before the
-                // resume point (they belong to earlier highlights)
-                for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
-                    advanceAlign(parts[i] == null ? "" : parts[i], sysAlign);
-                }
+            // resuming mid-page: advance the word matcher over the paragraphs
+            // before the resume point (they belong to earlier highlights)
+            for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
+                advanceAlign(parts[i] == null ? "" : parts[i], sysAlign);
             }
             for (int i = AppSP.get().lastBookParagraph; i < parts.length; i++) {
 
@@ -645,47 +664,24 @@ public class TTSEngine {
                         break;
                     }
 
-                    if (AppState.get().ttsWordMode) {
-                        enqueueWordsSystem(ttsEngine, big, i, sysAlign);
-                    } else {
-                        HashMap<String, String> mapTemp1 = new HashMap<String, String>();
-                        mapTemp1.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + i);
+                    HashMap<String, String> mapTemp1 = new HashMap<String, String>();
+                    mapTemp1.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + i);
+                    // continuous reading: register the word offsets so
+                    // onRangeStart can highlight the word being spoken
+                    registerRangeIndex(FINISHED_SIGNAL + i, big, sysAlign);
 
-                        ttsEngine.speak(big, TextToSpeech.QUEUE_ADD, mapTemp1);
-                        ttsEngine.playSilence(AppState.get().ttsPauseDuration, TextToSpeech.QUEUE_ADD, mapTemp);
-                        LOG.d("pageHTML-parts", i, big);
-                    }
+                    ttsEngine.speak(big, TextToSpeech.QUEUE_ADD, mapTemp1);
+                    ttsEngine.playSilence(AppState.get().ttsPauseDuration, TextToSpeech.QUEUE_ADD, mapTemp);
+                    LOG.d("pageHTML-parts", i, big);
                 }
             }
             ttsEngine.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
         } else {
             String textToPlay = text.replace(TxtUtils.TTS_PAUSE, "");
             LOG.d("pageHTML-parts-single", text);
-            if (AppState.get().ttsWordMode) {
-                // word-by-word with the system voice too: one tiny utterance per
-                // word gives the progress listener a start event per word, which
-                // drives the on-page word highlight
-                final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
-                final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
-                final boolean[] first = {true};
-                forEachWordToken(textToPlay, sysAlign, new WordSink() {
-                    @Override public void accept(final String word, final int flat) {
-                        HashMap<String, String> wm = new HashMap<String, String>();
-                        wm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, WORD_SIGNAL + flat);
-                        ttsEngine.speak(word, first[0] ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, wm);
-                        first[0] = false;
-                        ttsEngine.playSilence(wordPauseMs, TextToSpeech.QUEUE_ADD, mapTemp);
-                    }
-                });
-                if (first[0]) {
-                    // not a single readable token: keep the page turning
-                    ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
-                } else {
-                    ttsEngine.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
-                }
-            } else {
-                ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
-            }
+            final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+            registerRangeIndex(UTTERANCE_ID_DONE, textToPlay, sysAlign);
+            ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
         }
 
     }
@@ -1054,6 +1050,13 @@ public class TTSEngine {
         }
         final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
         LOG.d(TAG, "kokoro voice", AppState.get().ttsKokoroVoice, "sid", sid);
+        // custom voice filter: pitch shift + tempo compensation inside the engine
+        try {
+            kok.setPitchFactor(com.foobnix.ai.VoiceProfile.kokoroFactor(
+                    AppState.get().ttsCustomVoice, AppState.get().ttsKokoroVoice));
+        } catch (final Throwable t) {
+            LOG.e(t);
+        }
         float sp = AppState.get().ttsSpeed;
         if (sp <= 0 || sp > 4) {
             sp = 1.0f;
@@ -1064,28 +1067,25 @@ public class TTSEngine {
         // preLeft skips tokens carried over from the previous page (they map
         // to the PREVIOUS page's words and must not consume this page's)
         final WordAlign align = new WordAlign(ttsSourceOffset);
-        final boolean wordMode = AppState.get().ttsWordMode;
         if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
             kok.enqueueSilence(0, "Temp", sid, speed);
             // resuming mid-page: advance the word matcher over the words of the
             // paragraphs before the resume point, otherwise the first spoken
             // word would highlight a word at the top of the page
-            if (wordMode) {
-                for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
-                    String skipped = parts[i] == null ? "" : parts[i];
-                    for (String w : skipped.split("\\s+")) {
-                        if (TxtUtils.isEmpty(w) || normalizeWord(w).isEmpty()) {
-                            continue;
-                        }
-                        if (align.preLeft > 0) {
-                            align.preLeft--;
-                            continue;
-                        }
-                        final int flat = matchSourceWord(w, align.pagePtr);
-                        if (flat >= 0) {
-                            align.pagePtr = flat + 1;
-                        }
+            for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
+                String skipped = parts[i] == null ? "" : parts[i];
+                for (String w : skipped.split("\\s+")) {
+                    if (TxtUtils.isEmpty(w) || normalizeWord(w).isEmpty()) {
+                        continue;
+                    }
+                    if (align.preLeft > 0) {
+                        align.preLeft--;
+                        continue;
+                    }
+                    final int flat = matchSourceWord(w, align.pagePtr);
+                    if (flat >= 0) {
+                        align.pagePtr = flat + 1;
                     }
                 }
             }
@@ -1108,25 +1108,15 @@ public class TTSEngine {
                         LOG.d("next-page signal");
                         break;
                     }
-                    if (wordMode) {
-                        enqueueSentencesRealtime(kok, big, i, sid, speed, align);
-                    } else {
-                        kok.enqueueSpeak(big, FINISHED_SIGNAL + i, sid, speed);
-                        kok.enqueueSilence(AppState.get().ttsPauseDuration, "Temp", sid, speed);
-                        LOG.d("kokoro pageHTML-parts", i);
-                    }
+                    enqueueSentencesRealtime(kok, big, i, sid, speed, align);
                 }
             }
             kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
         } else {
             LOG.d("kokoro pageHTML-parts-single");
             final String clean = text.replace(TxtUtils.TTS_PAUSE, "");
-            if (wordMode) {
-                enqueueSentencesRealtime(kok, clean, -1, sid, speed, align);
-                kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
-            } else {
-                kok.enqueueSpeak(clean, UTTERANCE_ID_DONE, sid, speed);
-            }
+            enqueueSentencesRealtime(kok, clean, -1, sid, speed, align);
+            kok.enqueueSilence(0, UTTERANCE_ID_DONE, sid, speed);
         }
     }
 
@@ -1183,27 +1173,147 @@ public class TTSEngine {
     }
 
     /**
-     * Word-by-word reading with the SYSTEM voice: one tiny utterance per word
-     * so the UtteranceProgressListener.onStart("ttsW<idx>") highlights the word
-     * being spoken - the same protocol the offline AI voice uses.
+     * Continuous reading with the SYSTEM voice: the word highlight is driven
+     * by UtteranceProgressListener.onRangeStart (API 26+, supported by Google
+     * TTS). This registers the char offset of every readable token of one
+     * utterance together with its flat page word index; onRangeStart then maps
+     * the spoken range to the word that is being heard - no separate audio per
+     * word, the sentence is spoken continuously.
      */
-    private void enqueueWordsSystem(final TextToSpeech engine, final String paragraph,
-                                    final int paragraphIndex, final WordAlign align) {
-        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
-        forEachWordToken(paragraph, align, new WordSink() {
-            @Override public void accept(final String word, final int flat) {
-                HashMap<String, String> wm = new HashMap<String, String>();
-                wm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, WORD_SIGNAL + flat);
-                engine.speak(word, TextToSpeech.QUEUE_ADD, wm);
-                engine.playSilence(wordPauseMs, TextToSpeech.QUEUE_ADD, mapTemp);
-            }
-        });
-        if (paragraphIndex >= 0) {
-            // keep the resume protocol: paragraph i finished
-            HashMap<String, String> fm = new HashMap<String, String>();
-            fm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + paragraphIndex);
-            engine.playSilence(0, TextToSpeech.QUEUE_ADD, fm);
+    private void registerRangeIndex(final String utteranceId, final String spokenText,
+                                    final WordAlign align) {
+        if (TxtUtils.isEmpty(spokenText)) {
+            return;
         }
+        final java.util.List<Integer> starts = new java.util.ArrayList<Integer>();
+        final java.util.List<Integer> flats = new java.util.ArrayList<Integer>();
+        int scan = 0;
+        for (final String w : spokenText.split("\\s+")) {
+            if (TxtUtils.isEmpty(w)) {
+                continue;
+            }
+            final int at = spokenText.indexOf(w, scan);
+            if (at < 0) {
+                continue;
+            }
+            scan = at + w.length();
+            if (normalizeWord(w).isEmpty()) {
+                // punctuation-only token: produces no audio and no range event
+                continue;
+            }
+            if (align.preLeft > 0) {
+                align.preLeft--;
+                continue;
+            }
+            final int flat = matchSourceWord(w, align.pagePtr);
+            if (flat >= 0) {
+                align.pagePtr = flat + 1;
+            }
+            starts.add(at);
+            flats.add(flat);
+        }
+        if (!starts.isEmpty()) {
+            ttsRangeIndex.put(utteranceId, new int[][]{toIntArray(starts), toIntArray(flats)});
+        }
+    }
+
+    /**
+     * @return the flat page word index of the token that covers the given
+     * char start of the utterance (onRangeStart), -1 when nothing matches
+     */
+    public int flatForRangeStart(final String utteranceId, final int charStart) {
+        final int[][] idx = ttsRangeIndex.get(utteranceId);
+        if (idx == null) {
+            return -1;
+        }
+        final int[] starts = idx[0];
+        final int[] flats = idx[1];
+        int lo = 0, hi = starts.length - 1, res = -1;
+        while (lo <= hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (starts[mid] <= charStart) {
+                res = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return res < 0 ? -1 : flats[res];
+    }
+
+    /**
+     * Applies the selected system voice (AppState.ttsSystemVoice) and the
+     * pitch of the custom voice filter. Safe to call before the engine
+     * finishes init: TextToSpeech applies the params on connect.
+     */
+    public void applyVoiceSettings() {
+        final TextToSpeech t = ttsEngine;
+        if (t == null) {
+            return;
+        }
+        try {
+            final String want = AppState.get().ttsSystemVoice;
+            if (TxtUtils.isNotEmpty(want) && t.getVoices() != null) {
+                for (final android.speech.tts.Voice v : t.getVoices()) {
+                    if (v != null && want.equals(v.getName())) {
+                        t.setVoice(v);
+                        break;
+                    }
+                }
+            }
+            t.setPitch(effectiveSystemPitch());
+        } catch (final Throwable e) {
+            LOG.e(e);
+        }
+    }
+
+    /** system voice pitch: the user's pitch setting x the custom voice filter */
+    private float effectiveSystemPitch() {
+        float pitch = AppState.get().ttsPitch;
+        try {
+            final com.foobnix.ai.VoiceProfile vp = com.foobnix.ai.VoiceProfile.active();
+            if (vp != null) {
+                pitch *= vp.pitchFactorFor(com.foobnix.ai.VoiceProfile.BASELINE_SYSTEM);
+            }
+        } catch (final Throwable t) {
+            LOG.e(t);
+        }
+        return Math.max(0.5f, Math.min(2.0f, pitch));
+    }
+
+    /**
+     * @return the voices of the system engine (may be empty before init),
+     * locally synthesized ones first
+     */
+    public java.util.List<android.speech.tts.Voice> listSystemVoices() {
+        final java.util.List<android.speech.tts.Voice> out =
+                new java.util.ArrayList<android.speech.tts.Voice>();
+        final TextToSpeech t = ttsEngine;
+        if (t == null) {
+            return out;
+        }
+        try {
+            final java.util.Set<android.speech.tts.Voice> voices = t.getVoices();
+            if (voices != null) {
+                out.addAll(voices);
+            }
+            java.util.Collections.sort(out, new java.util.Comparator<android.speech.tts.Voice>() {
+                @Override public int compare(final android.speech.tts.Voice a,
+                                             final android.speech.tts.Voice b) {
+                    final int na = a == null || a.isNetworkConnected() ? 1 : 0;
+                    final int nb = b == null || b.isNetworkConnected() ? 1 : 0;
+                    if (na != nb) {
+                        return na - nb;
+                    }
+                    final String sa = a == null ? "" : String.valueOf(a.getLocale()) + a.getName();
+                    final String sb = b == null ? "" : String.valueOf(b.getLocale()) + b.getName();
+                    return sa.compareTo(sb);
+                }
+            });
+        } catch (final Throwable e) {
+            LOG.e(e);
+        }
+        return out;
     }
 
     /**

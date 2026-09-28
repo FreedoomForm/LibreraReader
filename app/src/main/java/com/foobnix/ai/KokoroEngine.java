@@ -68,6 +68,18 @@ public class KokoroEngine {
     private volatile OfflineTts tts;
     private volatile boolean ready = false;
     private volatile boolean preparing = false;
+    /** custom voice filter: pitch multiplier applied to the generated PCM
+     *  (the tempo is compensated via the generation speed, so the reading
+     *  pace stays natural) */
+    private volatile float pitchFactor = 1f;
+
+    public void setPitchFactor(final float f) {
+        this.pitchFactor = VoiceProfile.clampFactor(f);
+    }
+
+    public float getPitchFactor() {
+        return pitchFactor;
+    }
     private final java.util.concurrent.atomic.AtomicInteger workerScheduled =
             new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile boolean aborted = false;
@@ -302,7 +314,15 @@ public class KokoroEngine {
         if (t == null) {
             throw new IllegalStateException("Kokoro engine is not ready");
         }
-        GeneratedAudio audio = t.generate(text, sid, speed);
+        final float pf = pitchFactor;
+        // pitch shift = resample by pf, tempo restored by generating slower
+        GeneratedAudio audio = t.generate(text, sid,
+                Math.max(0.25f, Math.min(4f, speed / pf)));
+        if (pf != 1f && audio != null && audio.getSamples() != null
+                && audio.getSamples().length > 0) {
+            audio = new GeneratedAudio(PitchShifter.shift(audio.getSamples(), pf),
+                    audio.getSampleRate());
+        }
         audio.save(path);
     }
 
@@ -676,6 +696,16 @@ public class KokoroEngine {
                 // keeps the speech gap-free instead of throttling it to 600 ms
                 // ahead of the playhead. The old explicit gate was one of the
                 // reasons word-level sessions crawled.
+                // custom voice filter: resample by the pitch factor; the tempo
+                // is compensated by generating proportionally slower, so the
+                // reading pace stays natural while the voice pitch moves
+                // towards the recorded voice sample
+                final float effSpeed = Math.max(0.25f, Math.min(4f, it.speed / pitchFactor));
+                final PitchShifter shifter = pitchFactor != 1f ? new PitchShifter(pitchFactor) : null;
+                if (shifter != null) {
+                    android.util.Log.i(DIAG_TAG, "voice filter: pitch x" + pitchFactor
+                            + ", gen speed " + effSpeed);
+                }
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -693,7 +723,7 @@ public class KokoroEngine {
                 final Thread genThread = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
+                            t.generateWithCallback(it.text, it.sid, effSpeed, new OfflineTtsCallback() {
                                 public Integer invoke(float[] samples) {
                                     if (aborted || myGen != generation) {
                                         return 0;
@@ -711,16 +741,21 @@ public class KokoroEngine {
                                             }
                                         }
                                         headlessEscape(fAt, sampleRate, watch);
+                                        final float[] play = shifter == null ? samples
+                                                : shifter.process(samples, samples.length);
+                                        if (play.length == 0) {
+                                            return 1;
+                                        }
                                         // NON_BLOCKING + retry loop: generation can
                                         // never wedge inside a blocking write on a
                                         // head-less sink (CI emulator), and the
                                         // escape/watchdog keep making progress
                                         int off = 0;
-                                        while (off < samples.length) {
+                                        while (off < play.length) {
                                             if (aborted || myGen != generation) {
                                                 return 0;
                                             }
-                                            final int w = fAt.write(samples, off, samples.length - off,
+                                            final int w = fAt.write(play, off, play.length - off,
                                                     AudioTrack.WRITE_NON_BLOCKING);
                                             if (w > 0) {
                                                 off += w;

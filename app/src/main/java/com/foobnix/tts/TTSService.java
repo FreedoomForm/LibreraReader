@@ -1041,6 +1041,20 @@ import java.util.List;
     /** Single worker for TTS document work: keeps Play responsive. */
     private final java.util.concurrent.ExecutorService ttsWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
 
+    /** posts the on-page word highlight for the flat word index (both engines:
+     *  Kokoro playhead events and the system voice's onRangeStart) */
+    private void fireWordHighlight(final int idx) {
+        if (idx < 0) {
+            return;
+        }
+        final android.graphics.RectF wordRect = TTSEngine.get().getTTSWordRect(idx);
+        EventBus.getDefault()
+                .post(new MessageTTSWord(AppSP.get().lastBookPage, idx, wordRect));
+        android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                "tts word event: page=" + AppSP.get().lastBookPage
+                        + " idx=" + idx + " rect=" + (wordRect != null));
+    }
+
     private void playPageHeavy(String preText, int pageNumber, String anchor) {
         
             CodecDocument dc = getDC();
@@ -1075,40 +1089,34 @@ import java.util.List;
             }
             String pageHTML = page.getPageHTML();
             // capture the page's word boxes BEFORE the page is recycled: the
-            // word-by-word mode matches each spoken word against them so the
-            // reader view can highlight the word being spoken
+            // word highlight matches each spoken word against them (Kokoro
+            // fires "ttsW<idx>" from the playhead, the system voice maps
+            // onRangeStart char offsets - both engines, continuous reading)
             try {
-                // capture whenever word-by-word mode is on: the highlight
-                // toggle only gates the DRAWING, so flipping it mid-page must
-                // work without waiting for the next page
-                if (AppState.get().ttsWordMode) {
-                    TextWord[][] words2d = page.getText();
-                    List<TextWord> flat = new ArrayList<TextWord>();
-                    if (words2d != null) {
-                        for (TextWord[] line : words2d) {
-                            if (line == null) {
+                TextWord[][] words2d = page.getText();
+                List<TextWord> flat = new ArrayList<TextWord>();
+                if (words2d != null) {
+                    for (TextWord[] line : words2d) {
+                        if (line == null) {
+                            continue;
+                        }
+                        for (TextWord w : line) {
+                            if (w == null || TxtUtils.isEmpty(w.getWord())) {
                                 continue;
                             }
-                            for (TextWord w : line) {
-                                if (w == null || TxtUtils.isEmpty(w.getWord())) {
-                                    continue;
-                                }
-                                flat.add(w);
-                            }
+                            flat.add(w);
                         }
                     }
-                    // the offset must count exactly what the word aligner will
-                    // consume (punctuation-only tokens and TTS_PAUSE markers are
-                    // skipped by the matcher) - a plain whitespace count drifts
-                    final int offset = TTSEngine.countAlignerTokens(preText);
-                    TTSEngine.get().setTTSSourceWords(flat, offset);
-                    // always-on marker: the CI emulator test asserts this line,
-                    // and it lets a user logcat show where the highlight breaks
-                    android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
-                            "tts words: captured=" + flat.size() + " offset=" + offset);
-                } else {
-                    TTSEngine.get().setTTSSourceWords(null, 0);
                 }
+                // the offset must count exactly what the word aligner will
+                // consume (punctuation-only tokens and TTS_PAUSE markers are
+                // skipped by the matcher) - a plain whitespace count drifts
+                final int offset = TTSEngine.countAlignerTokens(preText);
+                TTSEngine.get().setTTSSourceWords(flat, offset);
+                // always-on marker: the CI emulator test asserts this line,
+                // and it lets a user logcat show where the highlight breaks
+                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                        "tts words: captured=" + flat.size() + " offset=" + offset);
             } catch (Throwable t) {
                 LOG.e(t);
                 android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
@@ -1161,26 +1169,33 @@ import java.util.List;
                          .setKokoroProgressListenerCompat(new UtteranceProgressListener() {
                              @Override public void onStart(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onStart", utteranceId);
-                                 // word-by-word mode: highlight the word being spoken
+                                 // sentence clips with a word list: highlight the
+                                 // word being spoken (AI voice protocol)
                                  if (utteranceId != null && utteranceId.startsWith(TTSEngine.WORD_SIGNAL)
                                          && AppState.get().ttsWordHighlight) {
                                      try {
                                          final int idx = Integer.parseInt(
                                                  utteranceId.substring(TTSEngine.WORD_SIGNAL.length()));
-                                         if (idx >= 0) {
-                                             final android.graphics.RectF wordRect = TTSEngine.get()
-                                                     .getTTSWordRect(idx);
-                                             EventBus.getDefault()
-                                                     .post(new MessageTTSWord(AppSP.get().lastBookPage, idx,
-                                                             wordRect));
-                                             android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
-                                                     "tts word event: page=" + AppSP.get().lastBookPage
-                                                             + " idx=" + idx + " rect=" + (wordRect != null));
-                                         }
+                                         fireWordHighlight(idx);
                                      } catch (NumberFormatException e) {
                                          LOG.d(TAG, "bad word utterance id", utteranceId);
                                      }
                                  }
+                             }
+
+                             /**
+                              * Continuous reading with the system voice: Google TTS
+                              * reports the spoken char range per word - map it to
+                              * the page's word boxes and highlight it (API 26+).
+                              */
+                             @Override public void onRangeStart(String utteranceId, int start,
+                                     int end, int frame) {
+                                 LOG.d(TAG, "onRangeStart", utteranceId, start, end);
+                                 if (utteranceId == null || !AppState.get().ttsWordHighlight) {
+                                     return;
+                                 }
+                                 fireWordHighlight(
+                                         TTSEngine.get().flatForRangeStart(utteranceId, start));
                              }
 
                              @Override public void onError(String utteranceId) {
