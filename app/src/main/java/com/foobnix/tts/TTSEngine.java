@@ -441,6 +441,28 @@ public class TTSEngine {
         return out.toString();
     }
 
+    /**
+     * Number of tokens the word aligner (forEachWordToken) actually consumes
+     * from the given text: TTS_PAUSE markers split paragraphs first and
+     * punctuation-only tokens are skipped - the exact inverse of WordAlign,
+     * so the carried-over (preText) offset never drifts.
+     */
+    public static int countAlignerTokens(final String text) {
+        if (TxtUtils.isEmpty(text)) {
+            return 0;
+        }
+        int n = 0;
+        for (final String part : text.split(TxtUtils.TTS_PAUSE)) {
+            for (final String w : part.split("\\s+")) {
+                if (TxtUtils.isEmpty(w) || normalizeWord(w).isEmpty()) {
+                    continue;
+                }
+                n++;
+            }
+        }
+        return n;
+    }
+
     public void fireKokoroStart(String utteranceId) {
         try {
             if (kokoroProgressListener != null) {

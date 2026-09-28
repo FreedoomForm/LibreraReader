@@ -1094,7 +1094,10 @@ import java.util.List;
                             }
                         }
                     }
-                    TTSEngine.get().setTTSSourceWords(flat, countTokens(preText));
+                    // the offset must count exactly what the word aligner will
+                    // consume (punctuation-only tokens and TTS_PAUSE markers are
+                    // skipped by the matcher) - a plain whitespace count drifts
+                    TTSEngine.get().setTTSSourceWords(flat, TTSEngine.countAlignerTokens(preText));
                     LOG.d(TAG, "TTS word highlight: page words", flat.size());
                 } else {
                     TTSEngine.get().setTTSSourceWords(null, 0);
@@ -1276,20 +1279,6 @@ import java.util.List;
                 AppProfile.save(this);
             }, "@T TTS Save").start();
             }
-
-    /** number of whitespace-separated tokens in the given text (0 for empty) */
-    private static int countTokens(final String text) {
-        if (TxtUtils.isEmpty(text)) {
-            return 0;
-        }
-        int n = 0;
-        for (String t : text.split("\\s+")) {
-            if (TxtUtils.isNotEmpty(t)) {
-                n++;
-            }
-        }
-        return n;
-    }
 
     @Override public void onDestroy() {
         super.onDestroy();
