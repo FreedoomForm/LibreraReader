@@ -810,6 +810,25 @@ public class DragingDialogs {
         dialog.show("MovePage");
     }
 
+    /**
+     * Material switch look for the TTS toggles: the checked track/thumb take
+     * the app accent color, the unchecked ones stay neutral. The dialog runs
+     * under a framework theme (no colorControlActivated), so an explicit tint
+     * is what makes them read as proper Android switches instead of flat
+     * grey pills.
+     */
+    private static void tintTtsSwitch(final androidx.appcompat.widget.SwitchCompat sw) {
+        final int accent = AppState.get().tintThemeColor;
+        final android.content.res.ColorStateList thumb = new android.content.res.ColorStateList(
+                new int[][]{ {android.R.attr.state_checked}, {} },
+                new int[]{ accent, 0xFFF1F1F1 });
+        final android.content.res.ColorStateList track = new android.content.res.ColorStateList(
+                new int[][]{ {android.R.attr.state_checked}, {} },
+                new int[]{ (accent & 0x00FFFFFF) | 0x50000000, 0x33000000 });
+        sw.setThumbTintList(thumb);
+        sw.setTrackTintList(track);
+    }
+
     public static void dialogTextToSpeech(final FrameLayout anchor, final DocumentController controller) {
         if (controller == null) {
             return;
@@ -874,6 +893,7 @@ public class DragingDialogs {
                         .findViewById(R.id.ttsKokoroSwitch);
                 final TextView ttsKokoroVoice = view.findViewById(R.id.ttsKokoroVoice);
                 ttsKokoroSwitch.setChecked(AppState.get().ttsUseKokoro);
+                tintTtsSwitch(ttsKokoroSwitch);
                 ttsKokoroVoice.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 TxtUtils.underlineTextView(ttsKokoroVoice);
                 if (AppState.get().ttsUseKokoro) {
@@ -935,6 +955,7 @@ public class DragingDialogs {
                 final androidx.appcompat.widget.SwitchCompat ttsWordModeSwitch = view
                         .findViewById(R.id.ttsWordModeSwitch);
                 ttsWordModeSwitch.setChecked(AppState.get().ttsWordMode);
+                tintTtsSwitch(ttsWordModeSwitch);
                 ttsWordModeSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
                         AppState.get().ttsWordMode = isChecked;
@@ -948,6 +969,7 @@ public class DragingDialogs {
                 final androidx.appcompat.widget.SwitchCompat ttsWordHighlightSwitch = view
                         .findViewById(R.id.ttsWordHighlightSwitch);
                 ttsWordHighlightSwitch.setChecked(AppState.get().ttsWordHighlight);
+                tintTtsSwitch(ttsWordHighlightSwitch);
                 ttsWordHighlightSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
                         AppState.get().ttsWordHighlight = isChecked;

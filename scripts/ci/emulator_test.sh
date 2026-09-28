@@ -22,6 +22,21 @@ if [ -z "$APK" ]; then
   exit 1
 fi
 adb install -r "$APK" || exit 1
+
+# ---------- 0. R8 / EventBus keep-rule guard (build-level) ----------
+# EventBus finds @Subscribe methods (onTTSWord, onPageNumber, ...) by
+# reflection; R8 silently stripping them killed ALL event-driven UI in the
+# release APK (word highlight included) while everything still compiled and
+# the app ran. The proguard rules keep the original method names, so the
+# presence of "onTTSWord" in classes.dex is a deterministic release-health
+# check that catches any future keep-rule regression at CI time.
+if unzip -p "$APK" classes.dex 2>/dev/null | grep -aq "onTTSWord"; then
+  echo "EVENTBUS SUBSCRIBERS PRESENT in release dex (R8 keep rules active)"
+else
+  echo "::error::R8 STRIPPED @Subscribe METHODS - EventBus keep rules missing in proguard-rules.pro"
+  exit 1
+fi
+
 # Raise the in-app synthesis kill-switch limits on emulators (TCG emulation is
 # slow); real devices keep the tight defaults (60s first audio / 30s stall).
 adb shell setprop kokoro.first_audio_ms 900000 || true
@@ -54,6 +69,18 @@ fi
 adb shell uiautomator dump /sdcard/ui.xml || true
 adb pull /sdcard/ui.xml ui.xml || true
 if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
+
+# ---------- 1b. Open a real book (reader activity registers EventBus
+# subscribers; the word-highlight DRAW path lives there). Without this the
+# service posts MessageTTSWord into the void and CI cannot see the break
+# that users see. The library grid shows the first book card at
+# [11,382][349,1059] on the pixel_6 profile - tap its center.
+echo "Opening a real book so the reader (and its highlight subscriber) is up..."
+adb shell input tap 180 720 || true
+sleep 25
+adb shell uiautomator dump /sdcard/ui-reader.xml || true
+adb pull /sdcard/ui-reader.xml ui-reader.xml || true
+if [ -f ui-reader.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui-reader.xml | head -8; fi
 
 # ---------- 2. TTS PLAYBACK TEST (Kokoro via TTSService) ----------
 printf 'Hello world. This is an offline text to speech test. Kokoro reads this sentence aloud on the emulator.' > ttsbook.txt
@@ -132,6 +159,19 @@ fi
 if grep -q "tts words FAILED" logcat-tts.txt; then
   echo "::error::WORD CAPTURE THREW - see tts words FAILED in logcat"
   grep -m 2 "tts words FAILED" logcat-tts.txt
+  exit 1
+fi
+# ---------- word highlight DRAW (reader side, end to end) ----------
+# The reader activity is open (phase 1b); its EventBus subscriber must turn
+# every "tts word event" into a "tts word DRAW" log line. Zero DRAW lines
+# means the subscriber chain is dead again (e.g. R8 stripping @Subscribe
+# methods) - exactly the failure users saw in release builds.
+DRAW=$(grep -c "tts word DRAW" logcat-tts.txt || true)
+echo "Word highlight DRAW calls (reader side): ${DRAW:-0}"
+if [ "${DRAW:-0}" = "0" ]; then
+  echo "--- debug: subscriber/draw diagnostics ---"
+  grep -m 5 "tts word event\|tts word DRAW\|No subscribers registered" logcat-tts.txt || true
+  echo "::error::NO WORD HIGHLIGHT DRAW - reader-side EventBus subscriber missing (R8 keep rules?)"
   exit 1
 fi
 KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)

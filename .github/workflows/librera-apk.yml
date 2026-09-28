@@ -281,6 +281,7 @@ jobs:
           path: |
             logcat.txt
             logcat-tts.txt
+            ui-reader.xml
             ui.xml
           if-no-files-found: ignore
 
@@ -339,6 +340,7 @@ jobs:
           path: |
             logcat.txt
             logcat-tts.txt
+            ui-reader.xml
             logcat-tts-ru.txt
             ui.xml
           if-no-files-found: ignore

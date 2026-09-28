@@ -94,6 +94,30 @@
 -keepnames class androidx.** extends android.app.Activity
 -keepnames class androidx.fragment.app.Fragment
 
+# greenrobot EventBus discovers subscriber methods (onTTSWord, onPageNumber,
+# onTTSStatus, ...) ONLY via reflection inside EventBus.register(); nothing
+# references them directly, so R8 stripped every @Subscribe method from the
+# release APK - each post then logged "No subscribers registered" and all
+# event-driven UI (word highlight, page numbers, TTS status buttons, ...)
+# silently died. These are the official greenrobot R8 rules.
+-keepattributes *Annotation*
+-keepclassmembers class * {
+    @org.greenrobot.eventbus.Subscribe <methods>;
+}
+# keep the original method names too: the CI emulator test greps the release
+# dex for "onTTSWord" to prove the keep rules survived any future cleanup
+-keepclassmembernames class * {
+    @org.greenrobot.eventbus.Subscribe <methods>;
+}
+-keep enum org.greenrobot.eventbus.ThreadMode { *; }
+
+# Event POJOs are carried through EventBus and their constructors/getters are
+# called directly, so R8 would keep them anyway; keep the class names too so
+# "No subscribers" logs (if any ever reappear) stay readable.
+-keepnames class com.foobnix.tts.MessageTTSWord {
+    *;
+}
+
 # sherpa-onnx JNI (libsherpa-onnx-jni.so) finds these classes and their fields
 # by exact name (RegisterNatives / GetFieldID on OfflineTts, OfflineTtsConfig,
 # GeneratedAudio, ...). Renaming any of them breaks OfflineTts init with
