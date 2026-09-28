@@ -197,6 +197,16 @@ public class TTSEngine {
             } else {
                 ttsEngine = new TextToSpeech(LibreraApp.context, onLisnter);
             }
+            // A listener registered BEFORE the engine existed (setKokoroProgress
+            // ListenerCompat skipped the attach because ttsEngine was null) must
+            // not be lost: word highlight depends on it from the very first page.
+            if (kokoroProgressListener != null) {
+                try {
+                    ttsEngine.setOnUtteranceProgressListener(kokoroProgressListener);
+                } catch (Throwable t) {
+                    LOG.e(t);
+                }
+            }
         }
 
         return ttsEngine;

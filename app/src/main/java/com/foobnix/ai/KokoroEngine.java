@@ -37,7 +37,7 @@ public class KokoroEngine {
     public static final String MODEL_VERSION = "kokoro-int8-multi-lang-v1.0-1";
     private static final String TAG = "KokoroEngine";
     /** always-on log tag: visible even in release builds (LOG.* is compiled out) */
-    private static final String DIAG_TAG = "KokoroDiag";
+    public static final String DIAG_TAG = "KokoroDiag";
     private static KokoroEngine INSTANCE = new KokoroEngine();
 
     public static KokoroEngine get() {

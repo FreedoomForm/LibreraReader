@@ -204,10 +204,14 @@ public class VerticalModeController extends DocumentController {
     public void highlightTTSWord(final int page, final int wordIndex, final android.graphics.RectF rect) {
         try {
             if (ctr == null || ctr.getDocumentModel() == null || ctr.getDocumentController() == null) {
+                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                        "tts word DRAW vertical SKIP: no document model, idx=" + wordIndex);
                 return;
             }
             final Page p = ctr.getDocumentModel().getPageByDocIndex(page);
             if (p == null || p.selectedText == null) {
+                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                        "tts word DRAW vertical SKIP: page not loaded, page=" + page + " idx=" + wordIndex);
                 return;
             }
             if (wordIndex < 0) {
@@ -253,11 +257,15 @@ public class VerticalModeController extends DocumentController {
                 }
             }
             if (found == null) {
+                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                        "tts word DRAW vertical SKIP: no box, page=" + page + " idx=" + wordIndex);
                 return;
             }
             p.selectedText.clear();
             p.selectedText.add(found);
             ctr.getDocumentController().redrawView();
+            android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                    "tts word DRAW vertical: page=" + page + " idx=" + wordIndex + " rect=" + found);
         } catch (Throwable e) {
             LOG.e(e);
         }

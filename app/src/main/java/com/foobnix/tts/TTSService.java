@@ -1078,7 +1078,10 @@ import java.util.List;
             // word-by-word mode matches each spoken word against them so the
             // reader view can highlight the word being spoken
             try {
-                if (AppState.get().ttsWordMode && AppState.get().ttsWordHighlight) {
+                // capture whenever word-by-word mode is on: the highlight
+                // toggle only gates the DRAWING, so flipping it mid-page must
+                // work without waiting for the next page
+                if (AppState.get().ttsWordMode) {
                     TextWord[][] words2d = page.getText();
                     List<TextWord> flat = new ArrayList<TextWord>();
                     if (words2d != null) {
@@ -1097,13 +1100,19 @@ import java.util.List;
                     // the offset must count exactly what the word aligner will
                     // consume (punctuation-only tokens and TTS_PAUSE markers are
                     // skipped by the matcher) - a plain whitespace count drifts
-                    TTSEngine.get().setTTSSourceWords(flat, TTSEngine.countAlignerTokens(preText));
-                    LOG.d(TAG, "TTS word highlight: page words", flat.size());
+                    final int offset = TTSEngine.countAlignerTokens(preText);
+                    TTSEngine.get().setTTSSourceWords(flat, offset);
+                    // always-on marker: the CI emulator test asserts this line,
+                    // and it lets a user logcat show where the highlight breaks
+                    android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                            "tts words: captured=" + flat.size() + " offset=" + offset);
                 } else {
                     TTSEngine.get().setTTSSourceWords(null, 0);
                 }
             } catch (Throwable t) {
                 LOG.e(t);
+                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                        "tts words FAILED: " + t);
                 TTSEngine.get().setTTSSourceWords(null, 0);
             }
             page.recycle();
@@ -1159,9 +1168,14 @@ import java.util.List;
                                          final int idx = Integer.parseInt(
                                                  utteranceId.substring(TTSEngine.WORD_SIGNAL.length()));
                                          if (idx >= 0) {
+                                             final android.graphics.RectF wordRect = TTSEngine.get()
+                                                     .getTTSWordRect(idx);
                                              EventBus.getDefault()
                                                      .post(new MessageTTSWord(AppSP.get().lastBookPage, idx,
-                                                             TTSEngine.get().getTTSWordRect(idx)));
+                                                             wordRect));
+                                             android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                                                     "tts word event: page=" + AppSP.get().lastBookPage
+                                                             + " idx=" + idx + " rect=" + (wordRect != null));
                                          }
                                      } catch (NumberFormatException e) {
                                          LOG.d(TAG, "bad word utterance id", utteranceId);

@@ -109,6 +109,31 @@ else
   echo "::error::KOKORO SYNTHESIS MISSING - engine prepared but produced no audio"
   exit 1
 fi
+# ---------- word-by-word highlight pipeline (service side, end to end) ----------
+# The service logs "tts words: captured=N" once per page (word boxes captured
+# from the page) and "tts word event: page=P idx=I" per spoken word matched to
+# a box. Both are always-on KokoroDiag lines - visible in release builds.
+WORDS=$(grep -m 1 "tts words: captured=" logcat-tts.txt | sed -E 's/.*captured=([0-9]+).*/\1/')
+echo "Word boxes captured on the TTS page: ${WORDS:-none}"
+if [ -z "$WORDS" ]; then
+  echo "::error::WORD CAPTURE MISSING - TTSService never captured page word boxes"
+  exit 1
+fi
+if [ "$WORDS" = "0" ]; then
+  echo "::error::WORD CAPTURE EMPTY - page.getText() returned no word boxes"
+  exit 1
+fi
+EVENTS=$(grep -c "tts word event:" logcat-tts.txt || true)
+echo "Word highlight events fired: ${EVENTS:-0}"
+if [ "${EVENTS:-0}" = "0" ]; then
+  echo "::error::NO WORD HIGHLIGHT EVENTS - utterance-id chain broken"
+  exit 1
+fi
+if grep -q "tts words FAILED" logcat-tts.txt; then
+  echo "::error::WORD CAPTURE THREW - see tts words FAILED in logcat"
+  grep -m 2 "tts words FAILED" logcat-tts.txt
+  exit 1
+fi
 KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
 echo "KokoroEngine log lines (informational): $KOK"
             ULE=$(grep -c "UnsatisfiedLinkError" logcat-tts.txt || true)

@@ -870,11 +870,11 @@ public class DragingDialogs {
                 final TextView ttsPage = view.findViewById(R.id.ttsPage);
 
                 final TextView textEngine = view.findViewById(R.id.ttsEngine);
-                final TextView ttsKokoroToggle = view.findViewById(R.id.ttsKokoroToggle);
+                final androidx.appcompat.widget.SwitchCompat ttsKokoroSwitch = view
+                        .findViewById(R.id.ttsKokoroSwitch);
                 final TextView ttsKokoroVoice = view.findViewById(R.id.ttsKokoroVoice);
-                ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on : R.string.tts_kokoro_off);
+                ttsKokoroSwitch.setChecked(AppState.get().ttsUseKokoro);
                 ttsKokoroVoice.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                TxtUtils.underlineTextView(ttsKokoroToggle);
                 TxtUtils.underlineTextView(ttsKokoroVoice);
                 if (AppState.get().ttsUseKokoro) {
                     // start loading the AI model now so Play/preview is instant
@@ -883,15 +883,14 @@ public class DragingDialogs {
                 if (AppState.get().ttsUseKokoro) {
                     textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 }
-                ttsKokoroToggle.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        if (!AppState.get().ttsUseKokoro) {
+                ttsKokoroSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                        if (isChecked) {
                             // the user turns the AI voice back ON - clear the failure fallback
                             TTSEngine.kokoroFallbackActive = false;
                         }
-                        AppState.get().ttsUseKokoro = !AppState.get().ttsUseKokoro;
-                        AppState.get().save(v.getContext());
-                        ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on : R.string.tts_kokoro_off);
+                        AppState.get().ttsUseKokoro = isChecked;
+                        AppState.get().save(activity);
                         textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
                         TTSEngine.get().stop();
                         org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
@@ -913,7 +912,7 @@ public class DragingDialogs {
                                 // Auto-enable so a chosen AI voice always plays as AI.
                                 if (!AppState.get().ttsUseKokoro) {
                                     AppState.get().ttsUseKokoro = true;
-                                    ttsKokoroToggle.setText(R.string.tts_kokoro_on);
+                                    ttsKokoroSwitch.setChecked(true);
                                 }
                                 TTSEngine.kokoroFallbackActive = false;
                                 AppState.get().save(activity);
@@ -932,47 +931,34 @@ public class DragingDialogs {
                     }
                 });
 
-                // ---- real-time word-by-word reading + word highlight toggles ----
-                final TextView ttsWordMode = view.findViewById(R.id.ttsWordMode);
-                final TextView ttsWordModeState = view.findViewById(R.id.ttsWordModeState);
-                final OnClickListener wordModeToggle = new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        AppState.get().ttsWordMode = !AppState.get().ttsWordMode;
-                        AppState.get().save(v.getContext());
+                // ---- real-time word-by-word reading + word highlight switches ----
+                final androidx.appcompat.widget.SwitchCompat ttsWordModeSwitch = view
+                        .findViewById(R.id.ttsWordModeSwitch);
+                ttsWordModeSwitch.setChecked(AppState.get().ttsWordMode);
+                ttsWordModeSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                        AppState.get().ttsWordMode = isChecked;
+                        AppState.get().save(activity);
                         TTSEngine.get().stop();
-                        ttsWordModeState.setText(AppState.get().ttsWordMode ? R.string.tts_word_mode_on
-                                                                            : R.string.tts_word_mode_off);
                         org.greenrobot.eventbus.EventBus.getDefault()
                                 .post(new com.foobnix.tts.TtsStatus());
                     }
-                };
-                ttsWordMode.setOnClickListener(wordModeToggle);
-                ttsWordModeState.setOnClickListener(wordModeToggle);
-                ttsWordModeState.setText(AppState.get().ttsWordMode ? R.string.tts_word_mode_on : R.string.tts_word_mode_off);
-                TxtUtils.underlineTextView(ttsWordMode);
-                TxtUtils.underlineTextView(ttsWordModeState);
+                });
 
-                final TextView ttsWordHighlight = view.findViewById(R.id.ttsWordHighlight);
-                final TextView ttsWordHighlightState = view.findViewById(R.id.ttsWordHighlightState);
-                final OnClickListener wordHighlightToggle = new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        AppState.get().ttsWordHighlight = !AppState.get().ttsWordHighlight;
-                        AppState.get().save(v.getContext());
-                        ttsWordHighlightState.setText(AppState.get().ttsWordHighlight ? R.string.tts_word_highlight_on
-                                                                                      : R.string.tts_word_highlight_off);
-                        if (!AppState.get().ttsWordHighlight) {
+                final androidx.appcompat.widget.SwitchCompat ttsWordHighlightSwitch = view
+                        .findViewById(R.id.ttsWordHighlightSwitch);
+                ttsWordHighlightSwitch.setChecked(AppState.get().ttsWordHighlight);
+                ttsWordHighlightSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                        AppState.get().ttsWordHighlight = isChecked;
+                        AppState.get().save(activity);
+                        if (!isChecked) {
                             // remove the highlight already drawn on the page
                             org.greenrobot.eventbus.EventBus.getDefault()
                                     .post(new com.foobnix.tts.MessageTTSWord(AppSP.get().lastBookPage, -1));
                         }
                     }
-                };
-                ttsWordHighlight.setOnClickListener(wordHighlightToggle);
-                ttsWordHighlightState.setOnClickListener(wordHighlightToggle);
-                ttsWordHighlightState.setText(AppState.get().ttsWordHighlight ? R.string.tts_word_highlight_on
-                                                                              : R.string.tts_word_highlight_off);
-                TxtUtils.underlineTextView(ttsWordHighlight);
-                TxtUtils.underlineTextView(ttsWordHighlightState);
+                });
                 final TextView ttsDiag = view.findViewById(R.id.ttsDiag);
                 final TextView ttsDiagNote = view.findViewById(R.id.ttsDiagNote);
                 if (TTSEngine.kokoroFallbackActive) {
@@ -1012,7 +998,7 @@ public class DragingDialogs {
                                     KokoroEngine.get().prepareAsync(null, true);
                                     AppState.get().save(activity);
                                     textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                                    ttsKokoroToggle.setText(R.string.tts_kokoro_on);
+                                    ttsKokoroSwitch.setChecked(true);
                                     org.greenrobot.eventbus.EventBus.getDefault()
                                             .post(new com.foobnix.tts.TtsStatus());
                                     return false;
@@ -1055,7 +1041,7 @@ public class DragingDialogs {
                                             }
                                             AppState.get().save(activity);
                                             textEngine.setText(TTSEngine.get().getCurrentEngineName());
-                                            ttsKokoroToggle.setText(R.string.tts_kokoro_off);
+                                            ttsKokoroSwitch.setChecked(false);
                                             org.greenrobot.eventbus.EventBus.getDefault()
                                                     .post(new com.foobnix.tts.TtsStatus());
                                         } else {
@@ -1294,8 +1280,7 @@ public class DragingDialogs {
                                             }
                                             textEngine.setText(labels.get(which));
                                         }
-                                        ttsKokoroToggle.setText(AppState.get().ttsUseKokoro ? R.string.tts_kokoro_on
-                                                                                            : R.string.tts_kokoro_off);
+                                        ttsKokoroSwitch.setChecked(AppState.get().ttsUseKokoro);
                                         AppState.get().save(activity);
                                         org.greenrobot.eventbus.EventBus.getDefault()
                                                 .post(new com.foobnix.tts.TtsStatus());
