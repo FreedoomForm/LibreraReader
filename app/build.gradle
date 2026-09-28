@@ -7,7 +7,7 @@ def taskName = getGradle().getStartParameter().getTaskRequests().toString()
 
 
 ext {
-    FDroidCodeNumber = 7350
+    FDroidCodeNumber = 7351
     FDroidVersionNumber = "9.6.25"
 }
 
@@ -281,6 +281,9 @@ dependencies {
     proImplementation project(':libPro')
     fdroidImplementation project(':libPro')
     implementation project(':libReflow')
+
+    // NVIDIA RE-USE voice enhancement (ONNX Runtime, Java API)
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
 
     //implementation project(":shared")
 

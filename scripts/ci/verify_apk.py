@@ -15,10 +15,9 @@ def need(pred, msg, count_min=1):
 need(lambda x: x == 'assets/kokoro/model.int8.onnx', 'model.int8.onnx present')
 need(lambda x: x == 'assets/kokoro/voices.bin', 'voices.bin present')
 need(lambda x: x == 'assets/kokoro/tokens.txt', 'tokens.txt present')
-need(lambda x: x.startswith('assets/kokoro/lexicon-'), 'kokoro lexicons', 3)
+need(lambda x: x == 'assets/kokoro/lexicon-us-en.txt', 'misaki-derived lexicon (us-en)')
 need(lambda x: x.startswith('assets/kokoro/espeak-ng-data/'), 'espeak-ng-data files', 300)
-need(lambda x: x.startswith('assets/kokoro/dict/'), 'zh dict files', 3)
-need(lambda x: x.startswith('assets/kokoro/') and x.endswith('.fst'), 'zh rule fsts', 3)
+need(lambda x: x == 'assets/reuse/model.int8.onnx', 'RE-USE enhancement model')
 need(lambda x: x.startswith('lib/arm64-v8a/'), 'arm64-v8a native libs', 2)
 
 so = [x for x in names if x.endswith('libsherpa-onnx-jni.so') and 'arm64' in x]

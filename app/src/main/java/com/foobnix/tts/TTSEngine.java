@@ -293,6 +293,13 @@ public class TTSEngine {
         LOG.d(TAG, "stop");
         kokoroPlaySeq.incrementAndGet();
         ttsRangeIndex.clear();
+        // RE-USE enhanced playback: release the AudioTrack, flush the queue and
+        // restore the engine's progress listener (no-op when not active)
+        try {
+            com.foobnix.ai.ReuseVoicePlayer.get().stop();
+        } catch (Exception e) {
+            LOG.e(e);
+        }
         if (AppState.get().ttsUseKokoro) {
             try {
                 KokoroEngine.get().stopInternal();
@@ -367,6 +374,11 @@ public class TTSEngine {
                 ttsEngine.setOnUtteranceProgressListener(l);
             }
         }
+    }
+
+    /** the service's utterance listener (used by the RE-USE player as downstream) */
+    public UtteranceProgressListener getKokoroProgressListener() {
+        return kokoroProgressListener;
     }
 
     public void setKokoroLegacyListenerCompat(OnUtteranceCompletedListener l) {
@@ -556,6 +568,87 @@ public class TTSEngine {
         }
     }
 
+    /** share of Latin letters among all letters - the 7M model is English-only */
+    static boolean isEnglishText(String text) {
+        int latin = 0;
+        int other = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isLetter(c)) {
+                if (c < 128) {
+                    latin++;
+                } else {
+                    other++;
+                }
+            }
+        }
+        if (latin + other == 0) {
+            return true;
+        }
+        return other <= (latin + other) * 0.3;
+    }
+
+    /**
+     * true when the user asked for the RE-USE enhanced system voice and the
+     * model is ready (or still warming up and likely to be ready in time)
+     */
+    private boolean useEnhancePath() {
+        if (!AppState.get().ttsVoiceEnhance || AppState.get().ttsUseKokoro) {
+            return false;
+        }
+        return com.foobnix.ai.VoiceEnhancer.get().isAvailable()
+                || com.foobnix.ai.ReuseVoicePlayer.get().isActive();
+    }
+
+    /**
+     * Queues the page paragraphs into the RE-USE player instead of the TTS
+     * playback queue. Returns false when the system engine is unavailable
+     * (the caller falls back to the plain speak path).
+     */
+    private boolean speakEnhancedLocked(final String text) {
+        if (getTTS(null) == null) {
+            return false;
+        }
+        final com.foobnix.ai.ReuseVoicePlayer reuse = com.foobnix.ai.ReuseVoicePlayer.get();
+        if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
+            String[] parts = text.split(TxtUtils.TTS_PAUSE);
+            final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+            for (int i = AppSP.get().lastBookParagraph; i < parts.length; i++) {
+                String big = parts[i];
+                big = big.trim();
+                if (TxtUtils.isNotEmpty(big)) {
+                    if (big.length() == 1 && !Character.isLetterOrDigit(big.charAt(0))) {
+                        LOG.d("Skip: " + big);
+                        continue;
+                    }
+                    if (big.contains(TxtUtils.TTS_SKIP)) {
+                        continue;
+                    }
+                    if (big.contains(TxtUtils.TTS_STOP)) {
+                        reuse.enqueue("", STOP_SIGNAL);
+                        LOG.d("Add stop signal");
+                    }
+                    if (big.contains(TxtUtils.TTS_NEXT)) {
+                        reuse.enqueuePageEnd();
+                        LOG.d("next-page signal");
+                        break;
+                    }
+                    registerRangeIndex(FINISHED_SIGNAL + i, big, sysAlign);
+                    reuse.enqueue(big, FINISHED_SIGNAL + i);
+                    LOG.d("pageHTML-parts", i, big);
+                }
+            }
+            reuse.enqueuePageEnd();
+        } else {
+            String textToPlay = text.replace(TxtUtils.TTS_PAUSE, "");
+            LOG.d("pageHTML-parts-single", text);
+            final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+            registerRangeIndex(UTTERANCE_ID_DONE, textToPlay, sysAlign);
+            reuse.enqueue(textToPlay, UTTERANCE_ID_DONE);
+        }
+        return true;
+    }
+
     @TargetApi(Build.VERSION_CODES.LOLLIPOP) private void speekLocked(final String text) {
         this.text = text;
         // utterance ids repeat from page to page - drop the previous page's
@@ -573,11 +666,27 @@ public class TTSEngine {
             return;
         }
         if (AppState.get().ttsUseKokoro && !kokoroFallbackActive) {
-            // Offline AI voice: do not bind the system TextToSpeech here at
-            // all - its init callback sleeps 1s on the main thread and the
-            // engine itself is never used for playback.
-            kokoroSpeakLocked(text);
-            return;
+            // The bundled Kokoro-7M-Distill model is English-only: Cyrillic
+            // (or other non-Latin) text would be phonemized into sounds the
+            // model never saw - garbage audio. Those books read with the
+            // system voice instead.
+            if (isEnglishText(text)) {
+                // Offline AI voice: do not bind the system TextToSpeech here at
+                // all - its init callback sleeps 1s on the main thread and the
+                // engine itself is never used for playback.
+                kokoroSpeakLocked(text);
+                return;
+            }
+            android.util.Log.i("KokoroDiag", "kokoro skip: non-English text, using system TTS");
+        }
+        if (useEnhancePath()) {
+            // RE-USE enhanced system voice: paragraphs go through
+            // synthesizeToFile -> ONNX filter -> AudioTrack. The playback
+            // completion re-fires the same utterance callbacks, so the
+            // service protocol (bookmarks, page turns, stop) is unchanged.
+            if (com.foobnix.ai.ReuseVoicePlayer.get().activate() && speakEnhancedLocked(text)) {
+                return;
+            }
         }
         if (ttsEngine == null) {
             LOG.d("getTTS-status was null");
@@ -1050,13 +1159,6 @@ public class TTSEngine {
         }
         final int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
         LOG.d(TAG, "kokoro voice", AppState.get().ttsKokoroVoice, "sid", sid);
-        // custom voice filter: pitch shift + tempo compensation inside the engine
-        try {
-            kok.setPitchFactor(com.foobnix.ai.VoiceProfile.kokoroFactor(
-                    AppState.get().ttsCustomVoice, AppState.get().ttsKokoroVoice));
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
         float sp = AppState.get().ttsSpeed;
         if (sp <= 0 || sp > 4) {
             sp = 1.0f;
@@ -1267,18 +1369,9 @@ public class TTSEngine {
         }
     }
 
-    /** system voice pitch: the user's pitch setting x the custom voice filter */
+    /** system voice pitch: the user's pitch setting, clamped to the engine range */
     private float effectiveSystemPitch() {
-        float pitch = AppState.get().ttsPitch;
-        try {
-            final com.foobnix.ai.VoiceProfile vp = com.foobnix.ai.VoiceProfile.active();
-            if (vp != null) {
-                pitch *= vp.pitchFactorFor(com.foobnix.ai.VoiceProfile.BASELINE_SYSTEM);
-            }
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        return Math.max(0.5f, Math.min(2.0f, pitch));
+        return Math.max(0.5f, Math.min(2.0f, AppState.get().ttsPitch));
     }
 
     /**

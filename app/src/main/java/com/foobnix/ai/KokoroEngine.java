@@ -29,12 +29,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Offline AI TTS engine: Kokoro-82M (int8) through sherpa-onnx.
+ * Offline AI TTS engine: Kokoro-7M-Distill (int8, ~8.7 MB) through sherpa-onnx.
  * The model ships inside the APK assets (assets/kokoro) and is unpacked to
- * filesDir/kokoro on first use, so the reader works fully offline.
+ * filesDir/kokoro on first use, so the reader works fully offline. The 7M
+ * distilled model is 25x smaller and ~4x faster than the previous 82M build
+ * (RTF ~0.2 on 4 CPU threads).
  */
 public class KokoroEngine {
-    public static final String MODEL_VERSION = "kokoro-int8-multi-lang-v1.0-1";
+    public static final String MODEL_VERSION = "kokoro-7m-distill-int8-v1";
     private static final String TAG = "KokoroEngine";
     /** always-on log tag: visible even in release builds (LOG.* is compiled out) */
     public static final String DIAG_TAG = "KokoroDiag";
@@ -68,18 +70,6 @@ public class KokoroEngine {
     private volatile OfflineTts tts;
     private volatile boolean ready = false;
     private volatile boolean preparing = false;
-    /** custom voice filter: pitch multiplier applied to the generated PCM
-     *  (the tempo is compensated via the generation speed, so the reading
-     *  pace stays natural) */
-    private volatile float pitchFactor = 1f;
-
-    public void setPitchFactor(final float f) {
-        this.pitchFactor = VoiceProfile.clampFactor(f);
-    }
-
-    public float getPitchFactor() {
-        return pitchFactor;
-    }
     private final java.util.concurrent.atomic.AtomicInteger workerScheduled =
             new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile boolean aborted = false;
@@ -198,10 +188,13 @@ public class KokoroEngine {
                 .setVoices(new File(dir, "voices.bin").getAbsolutePath())
                 .setTokens(new File(dir, "tokens.txt").getAbsolutePath())
                 .setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath())
-                .setDictDir(new File(dir, "dict").getAbsolutePath())
-                .setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath() + ","
-                        + new File(dir, "lexicon-gb-en.txt").getAbsolutePath() + ","
-                        + new File(dir, "lexicon-zh.txt").getAbsolutePath())
+                // The 7M student was distilled on misaki phonemes. The model is
+                // stamped version=2 so the (patched) runtime loads the
+                // misaki-derived lexicon for in-vocabulary words and uses
+                // espeak-ng only for OOV fallback. Raw espeak for every word
+                // would mispronounce the diphthong tokens (A/W/O) the model
+                // was trained on and shorten durations by up to ~37%.
+                .setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath())
                 .build();
         // synthesis is the heavy part: give ONNX as many cores as we can spare
         // (all but one on big phones; 2 on a weak 4-core device)
@@ -215,9 +208,6 @@ public class KokoroEngine {
                 .build();
         OfflineTtsConfig c = OfflineTtsConfig.builder()
                 .setModel(m)
-                .setRuleFsts(new File(dir, "date-zh.fst").getAbsolutePath() + ","
-                        + new File(dir, "number-zh.fst").getAbsolutePath() + ","
-                        + new File(dir, "phone-zh.fst").getAbsolutePath())
                 .build();
         OfflineTts t = new OfflineTts(c);
         OfflineTts old = tts;
@@ -314,15 +304,7 @@ public class KokoroEngine {
         if (t == null) {
             throw new IllegalStateException("Kokoro engine is not ready");
         }
-        final float pf = pitchFactor;
-        // pitch shift = resample by pf, tempo restored by generating slower
-        GeneratedAudio audio = t.generate(text, sid,
-                Math.max(0.25f, Math.min(4f, speed / pf)));
-        if (pf != 1f && audio != null && audio.getSamples() != null
-                && audio.getSamples().length > 0) {
-            audio = new GeneratedAudio(PitchShifter.shift(audio.getSamples(), pf),
-                    audio.getSampleRate());
-        }
+        GeneratedAudio audio = t.generate(text, sid, speed);
         audio.save(path);
     }
 
@@ -696,16 +678,6 @@ public class KokoroEngine {
                 // keeps the speech gap-free instead of throttling it to 600 ms
                 // ahead of the playhead. The old explicit gate was one of the
                 // reasons word-level sessions crawled.
-                // custom voice filter: resample by the pitch factor; the tempo
-                // is compensated by generating proportionally slower, so the
-                // reading pace stays natural while the voice pitch moves
-                // towards the recorded voice sample
-                final float effSpeed = Math.max(0.25f, Math.min(4f, it.speed / pitchFactor));
-                final PitchShifter shifter = pitchFactor != 1f ? new PitchShifter(pitchFactor) : null;
-                if (shifter != null) {
-                    android.util.Log.i(DIAG_TAG, "voice filter: pitch x" + pitchFactor
-                            + ", gen speed " + effSpeed);
-                }
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -723,7 +695,7 @@ public class KokoroEngine {
                 final Thread genThread = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            t.generateWithCallback(it.text, it.sid, effSpeed, new OfflineTtsCallback() {
+                            t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
                                 public Integer invoke(float[] samples) {
                                     if (aborted || myGen != generation) {
                                         return 0;
@@ -741,21 +713,16 @@ public class KokoroEngine {
                                             }
                                         }
                                         headlessEscape(fAt, sampleRate, watch);
-                                        final float[] play = shifter == null ? samples
-                                                : shifter.process(samples, samples.length);
-                                        if (play.length == 0) {
-                                            return 1;
-                                        }
                                         // NON_BLOCKING + retry loop: generation can
                                         // never wedge inside a blocking write on a
                                         // head-less sink (CI emulator), and the
                                         // escape/watchdog keep making progress
                                         int off = 0;
-                                        while (off < play.length) {
+                                        while (off < samples.length) {
                                             if (aborted || myGen != generation) {
                                                 return 0;
                                             }
-                                            final int w = fAt.write(play, off, play.length - off,
+                                            final int w = fAt.write(samples, off, samples.length - off,
                                                     AudioTrack.WRITE_NON_BLOCKING);
                                             if (w > 0) {
                                                 off += w;

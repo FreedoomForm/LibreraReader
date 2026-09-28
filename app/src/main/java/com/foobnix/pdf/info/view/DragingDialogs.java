@@ -923,13 +923,7 @@ public class DragingDialogs {
                 final Runnable updateVoiceValues = new Runnable() {
                     @Override public void run() {
                         String v;
-                        if (TxtUtils.isNotEmpty(AppState.get().ttsCustomVoice)) {
-                            final com.foobnix.ai.VoiceProfile p = com.foobnix.ai.VoiceProfile
-                                    .loadByName(activity, AppState.get().ttsCustomVoice);
-                            v = "\u2605 " + (p != null && TxtUtils.isNotEmpty(p.label) ? p.label
-                                    : AppState.get().ttsCustomVoice)
-                                    + " \u2014 " + activity.getString(R.string.tts_voice_filter_on);
-                        } else if (TxtUtils.isNotEmpty(AppState.get().ttsSystemVoice)) {
+                        if (TxtUtils.isNotEmpty(AppState.get().ttsSystemVoice)) {
                             v = AppState.get().ttsSystemVoice;
                             for (final android.speech.tts.Voice voice : TTSEngine.get().listSystemVoices()) {
                                 if (voice != null && voice.getName().equals(AppState.get().ttsSystemVoice)) {
@@ -943,9 +937,6 @@ public class DragingDialogs {
                             v = activity.getString(R.string.tts_voice_default);
                         }
                         ttsSystemVoiceValue.setText(v);
-                        if (TxtUtils.isNotEmpty(AppState.get().ttsCustomVoice)) {
-                            ttsKokoroVoice.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice) + " \u2605");
-                        }
                     }
                 };
                 updateVoiceValues.run();
@@ -955,53 +946,33 @@ public class DragingDialogs {
                     }
                 });
 
+                // ---- RE-USE voice enhancement of the system TTS output ----
+                final androidx.appcompat.widget.SwitchCompat ttsVoiceEnhanceSwitch = view
+                        .findViewById(R.id.ttsVoiceEnhanceSwitch);
+                ttsVoiceEnhanceSwitch.setChecked(AppState.get().ttsVoiceEnhance);
+                tintTtsSwitch(ttsVoiceEnhanceSwitch);
+                ttsVoiceEnhanceSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                        AppState.get().ttsVoiceEnhance = isChecked;
+                        AppState.get().save(activity);
+                        if (isChecked) {
+                            // warm the model up so the first utterance is not delayed
+                            com.foobnix.ai.ReuseVoicePlayer.get().prepareAsync();
+                        }
+                        TTSEngine.get().stop();
+                        org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
+                    }
+                });
+
                 final Runnable openKokoroVoicePicker = new Runnable() {
                     @Override public void run() {
-                        // custom (recorded/imported) voices go first, then the
-                        // 54 built-in AI voices - every engine offers its own list
-                        final java.util.List<com.foobnix.ai.VoiceProfile> customs =
-                                com.foobnix.ai.VoiceProfile.list(activity);
-                        final boolean filterOn = TxtUtils.isNotEmpty(AppState.get().ttsCustomVoice);
-                        final int base = customs.size() + (filterOn ? 1 : 0);
-                        final String[] items = new String[base + KokoroVoices.DISPLAY.length];
-                        int checked = -1;
-                        for (int i = 0; i < customs.size(); i++) {
-                            items[i] = "\u2605 " + customs.get(i).label + " \u2014 "
-                                    + activity.getString(R.string.tts_voice_filter_on);
-                            if (filterOn && AppState.get().ttsCustomVoice
-                                    .equals(customs.get(i).jsonFile(activity).getName())) {
-                                checked = i;
-                            }
-                        }
-                        if (filterOn) {
-                            items[customs.size()] = "\u2715 "
-                                    + activity.getString(R.string.tts_voice_disable_filter);
-                            if (checked < 0) {
-                                checked = customs.size();
-                            }
-                        }
-                        for (int i = 0; i < KokoroVoices.DISPLAY.length; i++) {
-                            items[base + i] = KokoroVoices.DISPLAY[i];
-                        }
-                        if (checked < 0) {
-                            checked = base + KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
-                        }
+                        final String[] items = KokoroVoices.DISPLAY;
+                        final int checked = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
                         android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(activity);
                         b.setTitle(R.string.tts_kokoro_voice);
                         b.setSingleChoiceItems(items, checked, new android.content.DialogInterface.OnClickListener() {
                             @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                                if (which < customs.size()) {
-                                    // a custom (recorded) voice: its filter plays over the AI voice
-                                    selectCustomVoice(activity, customs.get(which), updateVoiceValues);
-                                    dialog.dismiss();
-                                    return;
-                                }
-                                if (filterOn && which == customs.size()) {
-                                    clearCustomVoice(activity, updateVoiceValues);
-                                    dialog.dismiss();
-                                    return;
-                                }
-                                final int sid = which - base;
+                                final int sid = which;
                                 AppState.get().ttsKokoroVoice = KokoroVoices.CODES[sid];
                                 // Picking a Kokoro voice is an explicit request for the AI
                                 // engine. If the ON/OFF toggle was left OFF (easy to tap by
@@ -1018,11 +989,6 @@ public class DragingDialogs {
                                 textEngine.setText(KokoroVoices.DISPLAY[sid]);
                                 KokoroEngine.get().preview(sid);
                                 dialog.dismiss();
-                            }
-                        });
-                        b.setNeutralButton(R.string.tts_add_voice, new android.content.DialogInterface.OnClickListener() {
-                            @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                                showAddVoiceMenu(activity, updateVoiceValues);
                             }
                         });
                         b.show();
@@ -6465,12 +6431,11 @@ public class DragingDialogs {
         });
     }
 
-    // ==================== custom (recorded/imported) TTS voices ====================
+    // ==================== system TTS voices ====================
 
     /**
      * Voice list of the SYSTEM engine: the installed Android TTS voices
-     * (every engine type offers its own voice list) plus the custom recorded
-     * voices and the "add voice" button at the bottom of the list.
+     * (every engine type offers its own voice list).
      */
     private static void openSystemVoicePicker(final Activity activity, final Runnable onDone) {
         final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -6489,19 +6454,9 @@ public class DragingDialogs {
                     }
                     return;
                 }
-                final java.util.List<com.foobnix.ai.VoiceProfile> customs =
-                        com.foobnix.ai.VoiceProfile.list(activity);
-                final boolean filterOn = TxtUtils.isNotEmpty(AppState.get().ttsCustomVoice);
                 final java.util.List<android.speech.tts.Voice> voices = TTSEngine.get()
                                                                                  .listSystemVoices();
                 final java.util.List<String> labels = new java.util.ArrayList<String>();
-                for (final com.foobnix.ai.VoiceProfile p : customs) {
-                    labels.add("\u2605 " + p.label + " \u2014 "
-                                       + activity.getString(R.string.tts_voice_filter_on));
-                }
-                if (filterOn) {
-                    labels.add("\u2715 " + activity.getString(R.string.tts_voice_disable_filter));
-                }
                 final int defaultIdx = labels.size();
                 labels.add(activity.getString(R.string.tts_voice_default));
                 for (final android.speech.tts.Voice v : voices) {
@@ -6510,16 +6465,7 @@ public class DragingDialogs {
                                        + (v.isNetworkConnectionRequired() ? " (\u26a1)" : ""));
                 }
                 int checked = defaultIdx;
-                if (filterOn) {
-                    checked = customs.size();
-                    for (int i = 0; i < customs.size(); i++) {
-                        if (AppState.get().ttsCustomVoice
-                                .equals(customs.get(i).jsonFile(activity).getName())) {
-                            checked = i;
-                            break;
-                        }
-                    }
-                } else if (TxtUtils.isNotEmpty(AppState.get().ttsSystemVoice)) {
+                if (TxtUtils.isNotEmpty(AppState.get().ttsSystemVoice)) {
                     for (int i = 0; i < voices.size(); i++) {
                         if (voices.get(i).getName().equals(AppState.get().ttsSystemVoice)) {
                             checked = defaultIdx + 1 + i;
@@ -6533,11 +6479,7 @@ public class DragingDialogs {
                         new android.content.DialogInterface.OnClickListener() {
                             @Override public void onClick(android.content.DialogInterface dialog,
                                                           int which) {
-                                if (which < customs.size()) {
-                                    selectCustomVoice(activity, customs.get(which), onDone);
-                                } else if (filterOn && which == customs.size()) {
-                                    clearCustomVoice(activity, onDone);
-                                } else if (which == defaultIdx) {
+                                if (which == defaultIdx) {
                                     AppState.get().ttsSystemVoice = "";
                                     AppState.get().save(activity);
                                     TTSEngine.get().applyVoiceSettings();
@@ -6552,296 +6494,9 @@ public class DragingDialogs {
                                 dialog.dismiss();
                             }
                         });
-                b.setNeutralButton(R.string.tts_add_voice, new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        showAddVoiceMenu(activity, onDone);
-                    }
-                });
                 b.show();
             }
         };
         picker[0].run();
-    }
-
-    /** applies the custom voice filter to both engines and previews the AI voice */
-    private static void selectCustomVoice(final Activity activity,
-            final com.foobnix.ai.VoiceProfile p, final Runnable onDone) {
-        try {
-            AppState.get().ttsCustomVoice = p.jsonFile(activity).getName();
-            AppState.get().save(activity);
-            applyVoiceFilterNow();
-            Toast.makeText(activity, R.string.tts_voice_filter_on, Toast.LENGTH_SHORT).show();
-            // let the user hear the filtered AI voice right away
-            KokoroEngine.get().preview(KokoroVoices.sidOf(AppState.get().ttsKokoroVoice));
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        if (onDone != null) {
-            onDone.run();
-        }
-    }
-
-    private static void clearCustomVoice(final Activity activity, final Runnable onDone) {
-        try {
-            AppState.get().ttsCustomVoice = "";
-            AppState.get().save(activity);
-            applyVoiceFilterNow();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        if (onDone != null) {
-            onDone.run();
-        }
-    }
-
-    /** pushes the active filter into both engines right away */
-    private static void applyVoiceFilterNow() {
-        try {
-            KokoroEngine.get().setPitchFactor(com.foobnix.ai.VoiceProfile.kokoroFactor(
-                    AppState.get().ttsCustomVoice, AppState.get().ttsKokoroVoice));
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        try {
-            TTSEngine.get().applyVoiceSettings();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-    }
-
-    /** record a new voice sample or import one from an audio file (MP3...) */
-    private static void showAddVoiceMenu(final Activity activity, final Runnable onDone) {
-        final java.util.List<com.foobnix.ai.VoiceProfile> customs =
-                com.foobnix.ai.VoiceProfile.list(activity);
-        final java.util.List<String> options = new java.util.ArrayList<String>();
-        options.add(activity.getString(R.string.tts_record_voice));
-        options.add(activity.getString(R.string.tts_choose_voice_file));
-        if (!customs.isEmpty()) {
-            options.add(activity.getString(R.string.tts_delete_voices));
-        }
-        new AlertDialog.Builder(activity)
-            .setTitle(R.string.tts_add_voice)
-            .setItems(options.toArray(new String[options.size()]),
-                    new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface dialog, int which) {
-                            if (which == 0) {
-                                startVoiceRecording(activity, onDone);
-                            } else if (which == 1) {
-                                chooseVoiceFile(activity, onDone);
-                            } else {
-                                showDeleteVoicesMenu(activity, onDone);
-                            }
-                        }
-                    })
-            .show();
-    }
-
-    private static void showDeleteVoicesMenu(final Activity activity, final Runnable onDone) {
-        final java.util.List<com.foobnix.ai.VoiceProfile> customs =
-                com.foobnix.ai.VoiceProfile.list(activity);
-        if (customs.isEmpty()) {
-            return;
-        }
-        final String[] names = new String[customs.size()];
-        for (int i = 0; i < names.length; i++) {
-            names[i] = customs.get(i).label;
-        }
-        new AlertDialog.Builder(activity)
-            .setTitle(R.string.tts_delete_voices)
-            .setItems(names, new android.content.DialogInterface.OnClickListener() {
-                @Override public void onClick(DialogInterface dialog, int which) {
-                    final com.foobnix.ai.VoiceProfile p = customs.get(which);
-                    try {
-                        if (AppState.get().ttsCustomVoice.equals(p.jsonFile(activity).getName())) {
-                            AppState.get().ttsCustomVoice = "";
-                            AppState.get().save(activity);
-                            applyVoiceFilterNow();
-                        }
-                        p.jsonFile(activity).delete();
-                        p.audioFile(activity).delete();
-                    } catch (final Throwable t) {
-                        LOG.e(t);
-                    }
-                    if (onDone != null) {
-                        onDone.run();
-                    }
-                }
-            })
-            .show();
-    }
-
-    private static void chooseVoiceFile(final Activity activity, final Runnable onDone) {
-        try {
-            ChooserDialogFragment.chooseFileorFolder((androidx.fragment.app.FragmentActivity) activity,
-                    activity.getString(R.string.tts_choose_voice_file))
-                 .setOnSelectListener(new ResultResponse2<String, Dialog>() {
-                     @Override public boolean onResultRecive(final String result1, final Dialog result2) {
-                         try {
-                             result2.dismiss();
-                         } catch (final Throwable t) {
-                             LOG.e(t);
-                         }
-                         if (TxtUtils.isEmpty(result1) || !ExtUtils.isAudioContent(result1)) {
-                             Toast.makeText(activity, R.string.incorrect_value, Toast.LENGTH_SHORT)
-                                  .show();
-                             return false;
-                         }
-                         importVoiceFile(activity, new File(result1), onDone);
-                         return false;
-                     }
-                 });
-        } catch (final Throwable t) {
-            LOG.e(t);
-            Toast.makeText(activity, R.string.msg_unexpected_error, Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    /** copies the sample into the app storage, analyzes it and saves the profile */
-    private static void importVoiceFile(final Activity activity, final File src, final Runnable onDone) {
-        try {
-            final File dir = com.foobnix.ai.VoiceProfile.voicesDir(activity);
-            final String ext = src.getName().contains(".")
-                    ? src.getName().substring(src.getName().lastIndexOf('.') + 1).toLowerCase()
-                    : "mp3";
-            final File dst = new File(dir, "voice_" + System.currentTimeMillis() + "." + ext);
-            com.foobnix.android.utils.IO.copyFile(new java.io.FileInputStream(src), dst);
-            analyzeAndSave(activity, dst, onDone);
-        } catch (final Throwable t) {
-            LOG.e(t);
-            Toast.makeText(activity, R.string.tts_voice_failed, Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private static void analyzeAndSave(final Activity activity, final File audio, final Runnable onDone) {
-        final AlertDialog progress = new AlertDialog.Builder(activity)
-                .setTitle(R.string.tts_add_voice)
-                .setMessage(R.string.tts_voice_analyzing)
-                .setCancelable(false)
-                .create();
-        try {
-            progress.show();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        new Thread(new Runnable() {
-            @Override public void run() {
-                final com.foobnix.ai.VoiceProfile p = new com.foobnix.ai.VoiceProfile();
-                String error = null;
-                try {
-                    final com.foobnix.ai.VoiceProfile analyzed = com.foobnix.ai.VoiceProfile.analyze(audio);
-                    p.label = activity.getString(R.string.tts_my_voice) + " "
-                            + (com.foobnix.ai.VoiceProfile.list(activity).size() + 1);
-                    p.file = audio.getName();
-                    p.f0 = analyzed.f0;
-                    p.voiced = analyzed.voiced;
-                    p.durationMs = analyzed.durationMs;
-                    p.created = System.currentTimeMillis();
-                    p.save(activity);
-                } catch (final Throwable t) {
-                    LOG.e(t);
-                    error = t instanceof IllegalArgumentException ? "short" : "fail";
-                }
-                final String err = error;
-                new Handler(Looper.getMainLooper()).post(new Runnable() {
-                    @Override public void run() {
-                        try {
-                            progress.dismiss();
-                        } catch (final Throwable t) {
-                        }
-                        if (err != null) {
-                            Toast.makeText(activity,
-                                    err.equals("short") ? R.string.tts_voice_too_short
-                                            : R.string.tts_voice_failed,
-                                    Toast.LENGTH_LONG).show();
-                            audio.delete();
-                        } else {
-                            Toast.makeText(activity, R.string.tts_voice_saved, Toast.LENGTH_SHORT)
-                                 .show();
-                            selectCustomVoice(activity, p, onDone);
-                        }
-                    }
-                });
-            }
-        }, "voice-analyze").start();
-    }
-
-    /** records a voice sample with the microphone and analyzes it */
-    private static void startVoiceRecording(final Activity activity, final Runnable onDone) {
-        if (androidx.core.content.ContextCompat.checkSelfPermission(activity,
-                android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            androidx.core.app.ActivityCompat.requestPermissions(activity,
-                    new String[]{android.Manifest.permission.RECORD_AUDIO}, 9012);
-            Toast.makeText(activity, R.string.tts_need_mic_permission, Toast.LENGTH_LONG).show();
-            return;
-        }
-        final File dst = new File(com.foobnix.ai.VoiceProfile.voicesDir(activity),
-                "rec_" + System.currentTimeMillis() + ".m4a");
-        final android.media.MediaRecorder recorder = new android.media.MediaRecorder();
-        try {
-            recorder.setAudioSource(android.media.MediaRecorder.AudioSource.MIC);
-            recorder.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4);
-            recorder.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC);
-            recorder.setAudioSamplingRate(44100);
-            recorder.setAudioEncodingBitRate(96000);
-            recorder.setOutputFile(dst.getAbsolutePath());
-            recorder.setMaxDuration(30000);
-            recorder.prepare();
-            recorder.start();
-        } catch (final Throwable t) {
-            LOG.e(t);
-            try { recorder.release(); } catch (final Throwable t2) { }
-            Toast.makeText(activity, R.string.tts_voice_failed, Toast.LENGTH_LONG).show();
-            return;
-        }
-        final boolean[] stopped = {false};
-        final AlertDialog recording = new AlertDialog.Builder(activity)
-                .setTitle(R.string.tts_record_voice)
-                .setMessage(R.string.tts_recording_now)
-                .setCancelable(false)
-                .setPositiveButton(R.string.stop, new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(DialogInterface dialog, int which) {
-                        if (!stopped[0]) {
-                            stopped[0] = true;
-                            stopRecorder(activity, recorder, dst, onDone);
-                        }
-                    }
-                })
-                .create();
-        recorder.setOnInfoListener(new android.media.MediaRecorder.OnInfoListener() {
-            @Override public void onInfo(final android.media.MediaRecorder mr, final int what,
-                    final int extra) {
-                if (what == android.media.MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
-                        && !stopped[0]) {
-                    stopped[0] = true;
-                    stopRecorder(activity, mr, dst, onDone);
-                    try {
-                        if (recording.isShowing()) {
-                            recording.dismiss();
-                        }
-                    } catch (final Throwable t) {
-                    }
-                }
-            }
-        });
-        try {
-            recording.show();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-    }
-
-    private static void stopRecorder(final Activity activity, final android.media.MediaRecorder recorder,
-            final File dst, final Runnable onDone) {
-        try {
-            recorder.stop();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        try {
-            recorder.release();
-        } catch (final Throwable t) {
-            LOG.e(t);
-        }
-        analyzeAndSave(activity, dst, onDone);
     }
 }

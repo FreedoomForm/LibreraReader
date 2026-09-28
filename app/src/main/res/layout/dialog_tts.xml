@@ -156,6 +156,18 @@
             android:gravity="center_vertical">
 
             <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/ttsVoiceEnhanceSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/tts_voice_enhance_title" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <androidx.appcompat.widget.SwitchCompat
                 android:id="@+id/ttsWordHighlightSwitch"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

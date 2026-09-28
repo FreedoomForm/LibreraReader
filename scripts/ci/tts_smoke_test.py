@@ -8,17 +8,11 @@ kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
     model=os.path.join(d, 'model.int8.onnx'),
     voices=os.path.join(d, 'voices.bin'),
     tokens=os.path.join(d, 'tokens.txt'),
-    lexicon=','.join([os.path.join(d, 'lexicon-us-en.txt'),
-                      os.path.join(d, 'lexicon-gb-en.txt'),
-                      os.path.join(d, 'lexicon-zh.txt')]),
+    lexicon=os.path.join(d, 'lexicon-us-en.txt'),
     data_dir=os.path.join(d, 'espeak-ng-data'),
-    dict_dir=os.path.join(d, 'dict'),
 )
 cfg = sherpa_onnx.OfflineTtsConfig(
     model=sherpa_onnx.OfflineTtsModelConfig(kokoro=kokoro, num_threads=4, debug=False),
-    rule_fsts=','.join([os.path.join(d, 'date-zh.fst'),
-                        os.path.join(d, 'number-zh.fst'),
-                        os.path.join(d, 'phone-zh.fst')]),
 )
 print('Loading Kokoro from', d)
 tts = sherpa_onnx.OfflineTts(cfg)

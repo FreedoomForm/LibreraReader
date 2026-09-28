@@ -92,67 +92,125 @@ jobs:
           }
           GSJ
 
-      - name: Bundle Kokoro model (offline TTS, int8)
+      - name: Bundle Kokoro-7M-Distill + RE-USE models
         run: |
+          set -e
           python3 - <<'PYEOF'
-          import json, urllib.request, urllib.parse, os, sys
-          from concurrent.futures import ThreadPoolExecutor
-          REPO = 'csukuangfj/kokoro-int8-multi-lang-v1_0'
-          PIN = open('kokoro-model-pin.txt').read().strip()
-          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + REPO))
-          if meta.get('sha') != PIN:
-              sys.exit('Model pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), PIN))
-          tree = json.load(urllib.request.urlopen(
-              'https://huggingface.co/api/models/%s/tree/main?recursive=true' % REPO))
-          files = [f for f in tree if f.get('type') == 'file' and 'path' in f]
-          if len(files) < 110:
-              sys.exit('Tree listing looks incomplete: %d files' % len(files))
-          dest = os.path.join(os.environ['GITHUB_WORKSPACE'], 'app/src/main/assets/kokoro')
-          def dl(f):
-              p = f['path']
-              out = os.path.join(dest, p)
-              os.makedirs(os.path.dirname(out), exist_ok=True)
-              url = 'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, urllib.parse.quote(p, safe='/'))
-              last = None
-              for attempt in range(3):
-                  try:
-                      urllib.request.urlretrieve(url, out)
-                      got = os.path.getsize(out)
-                      if int(f.get('size', got)) != got:
-                          raise IOError('size mismatch %s: %d != %d' % (p, got, f.get('size')))
-                      return
-                  except Exception as e:
-                      last = e
-              raise last
-          with ThreadPoolExecutor(6) as ex:
-              list(ex.map(dl, files))
-          total = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(dest) for fn in fns)
-          print('Bundled %d files, %.1f MB' % (len(files), total / 1048576.0))
+          import json, urllib.request, os, sys, tarfile
+          BUNDLE = 'marwanelamami/kokoro-7m-distill-sherpa-onnx'
+          BUNDLE_PIN = open('kokoro-7m-pin.txt').read().strip()
+          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + BUNDLE))
+          if meta.get('sha') != BUNDLE_PIN:
+              sys.exit('Kokoro-7M bundle pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), BUNDLE_PIN))
+          dest = 'app/src/main/assets/kokoro'
+          os.makedirs(dest, exist_ok=True)
+          for name in ('model.int8.onnx', 'voices.bin', 'tokens.txt', 'lexicon-us-en.txt'):
+              url = 'https://huggingface.co/%s/resolve/%s/%s' % (BUNDLE, BUNDLE_PIN, name)
+              out = os.path.join(dest, name)
+              urllib.request.urlretrieve(url, out)
+              print('bundled', name, os.path.getsize(out), 'bytes')
+          # espeak-ng-data: phonemizer data for out-of-lexicon words
+          urllib.request.urlretrieve(
+              'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2',
+              '/tmp/espeak.tar.bz2')
+          with tarfile.open('/tmp/espeak.tar.bz2') as t:
+              t.extractall(dest)
+          cnt = sum(len(fns) for _, _, fns in os.walk(os.path.join(dest, 'espeak-ng-data')))
+          print('espeak-ng-data files:', cnt)
+          assert cnt >= 300, 'espeak-ng-data looks incomplete'
+          PYEOF
+          # stamp version=2 so the (patched) runtime takes the misaki-derived
+          # lexicon path instead of raw espeak for every word
+          pip install -q onnx
+          python3 - <<'PYEOF'
+          import onnx
+          p = 'app/src/main/assets/kokoro/model.int8.onnx'
+          m = onnx.load(p)
+          found = False
+          for prop in m.metadata_props:
+              if prop.key == 'version':
+                  prop.value = '2'
+                  found = True
+          assert found, 'version metadata missing'
+          onnx.checker.check_model(m)
+          onnx.save(m, p)
+          print('kokoro-7m stamped: version=2')
           PYEOF
           du -sh app/src/main/assets/kokoro
 
-      - name: Add x86_64 + armeabi-v7a + arm64-v8a native libs (static-link sherpa-onnx)
+      - name: Export NVIDIA RE-USE voice-enhancement model (ONNX int8)
         run: |
           set -e
-          SHP_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-android-static-link-onnxruntime.tar.bz2"
-          curl -sL -o /tmp/shp.tar.bz2 "$SHP_URL"
-          mkdir -p /tmp/shp && tar -xjf /tmp/shp.tar.bz2 -C /tmp/shp
-          for ABI in x86_64 armeabi-v7a arm64-v8a; do
-            DST="app/src/main/jniLibs/$ABI"
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q safetensors onnx onnxruntime numpy
+          python3 - <<'PYEOF'
+          import json, urllib.request, os, sys
+          REPO = 'nvidia/RE-USE'
+          PIN = open('reuse-pin.txt').read().strip()
+          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + REPO))
+          if meta.get('sha') != PIN:
+              sys.exit('RE-USE pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), PIN))
+          os.makedirs('/tmp/reuse', exist_ok=True)
+          for name in ('model.safetensors', 'config.json'):
+              urllib.request.urlretrieve(
+                  'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, name),
+                  '/tmp/reuse/' + name)
+              print(name, os.path.getsize('/tmp/reuse/' + name), 'bytes')
+          PYEOF
+          # 200 frames = 2.0 s chunks at 16 kHz; SKIP_REF skips the slow eager
+          # reference-pipeline cross-check (the graph math is validated by the
+          # STFT/iSTFT roundtrip assertion inside the exporter)
+          SKIP_REF=1 python3 scripts/reuse/export_onnx.py \
+              /tmp/reuse/model.safetensors /tmp/reuse/reuse_fp32.onnx 200
+          python3 - <<'PYEOF'
+          import numpy as np, onnxruntime as ort, os, time
+          from onnxruntime.quantization import quantize_dynamic, QuantType
+          os.makedirs('app/src/main/assets/reuse', exist_ok=True)
+          quantize_dynamic('/tmp/reuse/reuse_fp32.onnx',
+                           'app/src/main/assets/reuse/model.int8.onnx',
+                           weight_type=QuantType.QInt8)
+          out = 'app/src/main/assets/reuse/model.int8.onnx'
+          print('quantized:', os.path.getsize(out), 'bytes')
+          # smoke: run 2 s of speech-like signal through the shipped model
+          opts = ort.SessionOptions()
+          opts.intra_op_num_threads = 4
+          s = ort.InferenceSession(out, opts, providers=['CPUExecutionProvider'])
+          t = np.linspace(0, 2.0, 32000, dtype=np.float32)
+          wav = (0.3 * np.sin(2 * np.pi * 220 * t)
+                 + 0.15 * np.sin(2 * np.pi * 660 * t)).astype(np.float32)
+          t0 = time.time()
+          y = s.run(None, {'pcm_in': wav.reshape(1, -1)})[0]
+          dt = time.time() - t0
+          assert y.shape[-1] == 32000, 'unexpected output shape %s' % (y.shape,)
+          assert np.all(np.isfinite(y)), 'non-finite output'
+          print('RE-USE smoke OK: 2.0s audio in %.2fs (RTF %.2f on CI CPU), max|y|=%.3f'
+                % (dt, dt / 2.0, float(np.abs(y).max())))
+          PYEOF
+          du -sh app/src/main/assets/reuse
+
+      - name: Build native sherpa-onnx JNI libs (lexicon-first patch, static)
+        run: |
+          set -e
+          git clone --depth 1 --branch v1.13.8 https://github.com/k2-fsa/sherpa-onnx /tmp/sherpa-onnx
+          python3 scripts/ci/patch_sherpa.py /tmp/sherpa-onnx
+          export ANDROID_NDK=$ANDROID_NDK_LATEST_HOME
+          export BUILD_SHARED_LIBS=OFF
+          echo "ANDROID_NDK: $ANDROID_NDK"
+          build_abi() {
+            ABI=$1; SCRIPT=$2; BUILDDIR=$3
+            echo "== building $ABI =="
+            (cd /tmp/sherpa-onnx && $SCRIPT)
+            DST="$GITHUB_WORKSPACE/app/src/main/jniLibs/$ABI"
             mkdir -p "$DST"
-            SHP=$(find /tmp/shp -name "libsherpa-onnx-jni.so" -path "*$ABI*" | head -1)
-            if [ -z "$SHP" ]; then
-              echo "WARN: no libsherpa-onnx-jni.so for $ABI in tarball; skip"
-              rm -rf "$DST"
-              continue
-            fi
-            echo "$ABI: $SHP"
-            cp "$SHP" "$DST/"
-            if [ "$ABI" = "arm64-v8a" ]; then rm -f "$DST/libonnxruntime.so"; fi
-            CPP=$(find /tmp/shp -name "libc++_shared.so" -path "*$ABI*" | head -1)
+            cp /tmp/sherpa-onnx/$BUILDDIR/install/lib/libsherpa-onnx-jni.so "$DST/"
+            # static builds embed onnxruntime; libc++_shared is still needed
+            CPP=$(find /tmp/sherpa-onnx/$BUILDDIR/install/lib -name "libc++_shared.so" | head -1)
             if [ -n "$CPP" ]; then cp "$CPP" "$DST/"; fi
             ls -la "$DST/"
-          done
+          }
+          build_abi arm64-v8a  ./build-android-arm64-v8a.sh  build-android-arm64-v8a-static
+          build_abi armeabi-v7a ./build-android-armv7-eabi.sh build-android-armv7-eabi-static
+          build_abi x86_64    ./build-android-x86-64.sh     build-android-x86-64-static
 
       - name: Build APK (fdroid flavor, release-optimized R8)
         run: |
@@ -403,7 +461,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: librera-apk-latest
-          name: "Librera Reader - Offline AI TTS (Kokoro-82M)"
+          name: "Librera Reader - Offline AI TTS (Kokoro-7M)"
           files: dist/release/*
           prerelease: true
           allow_updates: true

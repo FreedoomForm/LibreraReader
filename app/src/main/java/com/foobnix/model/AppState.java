@@ -409,16 +409,16 @@ public class AppState {
     @IgnoreHashCode public boolean ttsReadBySentences = true;
     @IgnoreHashCode public String ttsSentecesDivs = TTS_PUNCUATIONS;
     @IgnoreHashCode public boolean ttsTunnOnLastWord = false;
-    // Offline AI TTS (Kokoro-82M, bundled in the APK)
+    // Offline AI TTS (Kokoro-7M-Distill, bundled in the APK)
     public volatile boolean ttsUseKokoro = true;
-    public volatile String ttsKokoroVoice = "af_heart";
+    public volatile String ttsKokoroVoice = "af_msa";
     // Selected voice of the system TextToSpeech engine (Voice.getName(),
     // "" = the engine's default voice). Each engine type offers its own list.
     public volatile String ttsSystemVoice = "";
-    // Custom voice profile (recorded in the app or imported from an MP3 file),
-    // file name inside filesDir/tts_voices ("" = no filter). The voice filter
-    // shifts the pitch of the CURRENT engine voice towards the recorded one.
-    public volatile String ttsCustomVoice = "";
+    // NVIDIA RE-USE real-time voice enhancement of the SYSTEM TTS output.
+    // Runs per utterance (synthesizeToFile -> enhance -> AudioTrack); on
+    // devices too slow to keep up it disables itself and reads unenhanced.
+    public volatile boolean ttsVoiceEnhance = false;
     // Word-by-word reading was removed at the user's request: both engines now
     // read continuously and only drive the word highlight. The flag is kept
     // (always false) so old settings files load without errors.

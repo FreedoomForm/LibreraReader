@@ -219,14 +219,22 @@ if grep -q "kokoro timeout\|kokoro failure" logcat-tts-ru.txt; then
   grep -m 5 -B 2 -A 8 "kokoro timeout\|kokoro failure" logcat-tts-ru.txt || true
   exit 1
 fi
+# The bundled Kokoro-7M-Distill is English-only: Russian text must be routed
+# to the system TTS (language guard logs "kokoro skip: non-English text").
+GUARD=$(grep -c "kokoro skip: non-English text" logcat-tts-ru.txt || true)
+echo "Language guard fired: $GUARD"
 RU_GEN=$(grep -c "kokoro gen" logcat-tts-ru.txt || true)
 echo "RU synthesis items: $RU_GEN"
-if [ "$RU_GEN" == "0" ]; then
-  if [ "${STRICT_RU:-1}" == "1" ]; then
-    echo "::error::NO RUSSIAN SYNTHESIS - kokoro produced no audio for Cyrillic text"
-    grep -m 25 "KokoroEngine\|TTSService\|AI TTS" logcat-tts-ru.txt || true
+if [ "${STRICT_RU_ENGLISH_ONLY:-1}" == "1" ]; then
+  if [ "${GUARD:-0}" == "0" ]; then
+    echo "::error::LANGUAGE GUARD MISSING - Cyrillic text reached the English-only model"
+    grep -m 25 "KokoroEngine\|TTSService\|AI TTS\|KokoroDiag" logcat-tts-ru.txt || true
     exit 1
   fi
-  echo "WARN: no RU synthesis yet (slow TCG runner) - informational only"
+  echo "OK: Russian text correctly routed to the system voice"
+else
+  if [ "$RU_GEN" == "0" ]; then
+    echo "WARN: no RU synthesis yet (slow TCG runner) - informational only"
+  fi
 fi
 echo "EMULATOR SMOKE TEST PASSED (RU too): Russian text synthesized without hangs"
