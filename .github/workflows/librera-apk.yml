@@ -138,60 +138,12 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/kokoro
 
-      # NOTE: experimental - the torch->ONNX Loop export needs ~60GB RAM for
-      # the 30 Mamba blocks (the exporter unrolls constant-trip loops). If it
-      # fails the release still ships: the enhancement toggle then simply
-      # reports the model as unavailable and reads unenhanced.
-      - name: Export NVIDIA RE-USE voice-enhancement model (ONNX int8)
-        continue-on-error: true
-        run: |
-          set -e
-          pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install -q safetensors onnx "onnxruntime==1.20.1" numpy
-          python3 - <<'PYEOF'
-          import json, urllib.request, os, sys
-          REPO = 'nvidia/RE-USE'
-          PIN = open('reuse-pin.txt').read().strip()
-          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + REPO))
-          if meta.get('sha') != PIN:
-              sys.exit('RE-USE pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), PIN))
-          os.makedirs('/tmp/reuse', exist_ok=True)
-          for name in ('model.safetensors', 'config.json'):
-              urllib.request.urlretrieve(
-                  'https://huggingface.co/%s/resolve/%s/%s' % (REPO, PIN, name),
-                  '/tmp/reuse/' + name)
-              print(name, os.path.getsize('/tmp/reuse/' + name), 'bytes')
-          PYEOF
-          # 200 frames = 2.0 s chunks at 16 kHz; SKIP_REF skips the slow eager
-          # reference-pipeline cross-check (the graph math is validated by the
-          # STFT/iSTFT roundtrip assertion inside the exporter)
-          SKIP_REF=1 python3 scripts/reuse/export_onnx.py \
-              /tmp/reuse/model.safetensors /tmp/reuse/reuse_fp32.onnx 200
-          python3 - <<'PYEOF'
-          import numpy as np, onnxruntime as ort, os, time
-          from onnxruntime.quantization import quantize_dynamic, QuantType
-          os.makedirs('app/src/main/assets/reuse', exist_ok=True)
-          quantize_dynamic('/tmp/reuse/reuse_fp32.onnx',
-                           'app/src/main/assets/reuse/model.int8.onnx',
-                           weight_type=QuantType.QInt8)
-          out = 'app/src/main/assets/reuse/model.int8.onnx'
-          print('quantized:', os.path.getsize(out), 'bytes')
-          # smoke: run 2 s of speech-like signal through the shipped model
-          opts = ort.SessionOptions()
-          opts.intra_op_num_threads = 4
-          s = ort.InferenceSession(out, opts, providers=['CPUExecutionProvider'])
-          t = np.linspace(0, 2.0, 32000, dtype=np.float32)
-          wav = (0.3 * np.sin(2 * np.pi * 220 * t)
-                 + 0.15 * np.sin(2 * np.pi * 660 * t)).astype(np.float32)
-          t0 = time.time()
-          y = s.run(None, {'pcm_in': wav.reshape(1, -1)})[0]
-          dt = time.time() - t0
-          assert y.shape[-1] == 32000, 'unexpected output shape %s' % (y.shape,)
-          assert np.all(np.isfinite(y)), 'non-finite output'
-          print('RE-USE smoke OK: 2.0s audio in %.2fs (RTF %.2f on CI CPU), max|y|=%.3f'
-                % (dt, dt / 2.0, float(np.abs(y).max())))
-          PYEOF
-          du -sh app/src/main/assets/reuse
+      # NOTE: the NVIDIA RE-USE ONNX export is intentionally not run in CI
+      # yet: torch's exporter unrolls constant-trip Mamba loops and needs
+      # >60GB RAM for the 30-block SEMamba (see scripts/reuse/export_onnx.py).
+      # The VoiceEnhancer in the app handles the missing model gracefully -
+      # the "Enhance voice (RE-USE)" toggle reports unavailable and reads
+      # unenhanced until the Loop-preserving export lands.
 
       - name: Build native sherpa-onnx JNI libs (lexicon-first patch, static)
         run: |

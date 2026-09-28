@@ -82,14 +82,22 @@ class MambaScan(nn.Module):
                     * Bv.float().transpose(1, 2).unsqueeze(1)
                     * x.float().unsqueeze(-1))         # (B, di, L, N)
 
-        # sequential scan -> ONNX Loop
+        # sequential scan -> ONNX Loop.
+        # The trip count is deliberately DATA-DEPENDENT (sum over a tensor
+        # derived from x): a Python-int / shape-derived bound would make the
+        # exporter unroll the whole sequence into the main graph (hundreds of
+        # MB and tens of GB of shape-inference memory). A runtime bound keeps
+        # it a compact onnx::Loop node.
+        trip = int(torch.sum(x[0, 0, :] * 0 + 1))
         state = torch.zeros(batch, self.d_inner, self.d_state,
                             dtype=torch.float32, device=x.device)
         ys = torch.jit.annotate(List[torch.Tensor], [])
-        for i in range(seqlen):
+        i = 0
+        while i < trip:
             state = deltaA[:, :, i] * state + deltaB_u[:, :, i]
             y = (state * Cv.float()[:, :, i].unsqueeze(1)).sum(-1)  # (B, di)
             ys.append(y)
+            i += 1
         y = torch.stack(ys, dim=2)                     # (B, di, L)
 
         y = y + x.float() * self.D.float().unsqueeze(0).unsqueeze(-1)
