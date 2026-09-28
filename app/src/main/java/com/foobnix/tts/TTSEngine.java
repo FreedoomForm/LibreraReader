@@ -1300,8 +1300,8 @@ public class TTSEngine {
             java.util.Collections.sort(out, new java.util.Comparator<android.speech.tts.Voice>() {
                 @Override public int compare(final android.speech.tts.Voice a,
                                              final android.speech.tts.Voice b) {
-                    final int na = a == null || a.isNetworkConnected() ? 1 : 0;
-                    final int nb = b == null || b.isNetworkConnected() ? 1 : 0;
+                    final int na = a == null || a.isNetworkConnectionRequired() ? 1 : 0;
+                    final int nb = b == null || b.isNetworkConnectionRequired() ? 1 : 0;
                     if (na != nb) {
                         return na - nb;
                     }

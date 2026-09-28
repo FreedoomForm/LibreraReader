@@ -6507,7 +6507,7 @@ public class DragingDialogs {
                 for (final android.speech.tts.Voice v : voices) {
                     labels.add((v.getLocale() != null ? v.getLocale().getDisplayName() + " \u2014 " : "")
                                        + v.getName()
-                                       + (v.isNetworkConnected() ? " (\u26a1)" : ""));
+                                       + (v.isNetworkConnectionRequired() ? " (\u26a1)" : ""));
                 }
                 int checked = defaultIdx;
                 if (filterOn) {
