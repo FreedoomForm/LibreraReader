@@ -75,6 +75,10 @@ public class KokoroEngine {
     private static final long MAX_LEAD_MS = 600;
     /** upper bound for waiting until the playhead drains the buffer */
     private static final long BARRIER_TIMEOUT_MS = 10000;
+    /** if the playhead does not move for this long while we are pacing, the
+     *  audio sink is not consuming anything (CI emulator / head-less device):
+     *  pacing would deadlock, so the buffer is flushed the old way instead */
+    private static final long FROZEN_HEAD_MS = 1200;
     /** consecutive zero-sample generations - 3 in a row trip the system-TTS fallback */
     private final java.util.concurrent.atomic.AtomicInteger zeroStreak =
             new java.util.concurrent.atomic.AtomicInteger(0);
@@ -373,19 +377,29 @@ public class KokoroEngine {
 
     /**
      * Waits until the hardware has played everything written so far (or the
-     * wait times out / the session is stopped). Used by barrier items so the
-     * page flip happens exactly when the audio ends, not while seconds of
-     * speech are still buffered.
+     * wait times out / the session is stopped / the sink proves head-less).
+     * Used by barrier items so the page flip happens exactly when the audio
+     * ends, not while seconds of speech are still buffered.
      */
     private void waitDrain(final AudioTrack at, final int sampleRate, final long myGen) {
         if (at == null) {
             return;
         }
         final long deadline = android.os.SystemClock.elapsedRealtime() + BARRIER_TIMEOUT_MS;
+        long lastHead = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        long lastMove = android.os.SystemClock.elapsedRealtime();
         while (!aborted && myGen == generation
                 && android.os.SystemClock.elapsedRealtime() < deadline) {
             if (leadMs(at, sampleRate) <= 0) {
                 break;
+            }
+            final long now = android.os.SystemClock.elapsedRealtime();
+            final long head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+            if (head != lastHead) {
+                lastHead = head;
+                lastMove = now;
+            } else if (now - lastMove > FROZEN_HEAD_MS) {
+                break; // nothing is consuming the stream - do not wait forever
             }
             try {
                 Thread.sleep(20);
@@ -393,6 +407,48 @@ public class KokoroEngine {
                 break;
             }
         }
+    }
+
+    /**
+     * Paces generation: blocks until at most {@code thresholdMs} of audio is
+     * still buffered ahead of the playhead. Escapes when the playhead is not
+     * moving at all (emulator/CI audio sinks never consume): the buffer is
+     * flushed so the session keeps going instead of deadlocking.
+     */
+    private void paceToLead(final AudioTrack at, final int sampleRate, final long thresholdMs, final long myGen) {
+        if (at == null) {
+            return;
+        }
+        long lastHead = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        long lastMove = android.os.SystemClock.elapsedRealtime();
+        while (!aborted && myGen == generation) {
+            if (leadMs(at, sampleRate) <= thresholdMs) {
+                return;
+            }
+            final long now = android.os.SystemClock.elapsedRealtime();
+            final long head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+            if (head != lastHead) {
+                lastHead = head;
+                lastMove = now;
+            } else if (now - lastMove > FROZEN_HEAD_MS) {
+                drainSink(at);
+                return;
+            }
+            try {
+                Thread.sleep(15);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+    }
+
+    /** drops everything buffered and restarts the track (head-less sinks only) */
+    private void drainSink(final AudioTrack at) {
+        try { at.pause(); } catch (Throwable e) { }
+        try { at.flush(); } catch (Throwable e) { }
+        writtenFrames.set(0); // the playhead position starts over after a flush
+        try { at.play(); } catch (Throwable e) { }
+        android.util.Log.i(DIAG_TAG, "audio sink not consuming - buffer flushed (emulator/headless path)");
     }
 
     /**
@@ -470,6 +526,12 @@ public class KokoroEngine {
                     TTSEngine.get().fireKokoroError(it.utteranceId);
                     return;
                 }
+                // real-time pacing: do not let generation run more than
+                // MAX_LEAD_MS ahead of what the user is hearing right now
+                paceToLead(fAt, sampleRate, MAX_LEAD_MS, myGen);
+                if (aborted || myGen != generation) {
+                    return;
+                }
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -491,24 +553,11 @@ public class KokoroEngine {
                                         return 0;
                                     }
                                     try {
-                                        // pacing: never generate more than MAX_LEAD_MS
-                                        // ahead of the playhead. This keeps the voice
-                                        // flowing in real time AND keeps the pauses in
-                                        // the audio (a generation-run-ahead buffer used
-                                        // to fire whole groups of phrases back to back)
-                                        while (!aborted && myGen == generation) {
-                                            if (leadMs(fAt, sampleRate) <= MAX_LEAD_MS) {
-                                                break;
-                                            }
-                                            Thread.sleep(15);
-                                        }
-                                        if (aborted || myGen != generation) {
-                                            return 0;
-                                        }
                                         // highlight when the sound is actually heard,
                                         // delayed by whatever is still buffered
                                         if (startFired.compareAndSet(false, true)) {
-                                            fireStartAt(it.utteranceId, leadMs(fAt, sampleRate), myGen, it.epoch);
+                                            fireStartAt(it.utteranceId,
+                                                    Math.min(leadMs(fAt, sampleRate), 1000), myGen, it.epoch);
                                         }
                                         final int written = fAt.write(samples, 0, samples.length,
                                                 AudioTrack.WRITE_BLOCKING);
@@ -637,15 +686,18 @@ public class KokoroEngine {
                     // playback, which glued whole phrases together ("speaks 5
                     // phrases at once"). Skipped when we are behind anyway (RTF>1
                     // device - no extra gap on top of the synthesis lag).
-                    if (at != null && leadMs(at, sampleRate) > 40) {
-                        try {
-                            if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
-                                at.play();
+                    if (at != null) {
+                        paceToLead(at, sampleRate, MAX_LEAD_MS, myGen);
+                        if (leadMs(at, sampleRate) > 40) {
+                            try {
+                                if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                                    at.play();
+                                }
+                            } catch (Throwable e) {
+                                LOG.e(e);
                             }
-                        } catch (Throwable e) {
-                            LOG.e(e);
+                            writeSilence(at, sampleRate, it.silenceMs, myGen);
                         }
-                        writeSilence(at, sampleRate, it.silenceMs, myGen);
                     }
                 } else if (at != null) {
                     // barrier (0 ms): paragraph counter and the page flip must
@@ -738,9 +790,9 @@ public class KokoroEngine {
         if (minBuf <= 0) {
             minBuf = 16384;
         }
-        // float PCM is 4 bytes per frame: 2 seconds is plenty because generation
+        // float PCM is 4 bytes per frame: 2.5 s is plenty because generation
         // is paced to stay MAX_LEAD_MS ahead of the playhead
-        int buf = Math.max(minBuf, sampleRate * 2 * 4);
+        int buf = Math.max(minBuf, (int) (sampleRate * 2.5f * 4));
         return new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
