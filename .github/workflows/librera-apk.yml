@@ -138,11 +138,16 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/kokoro
 
+      # NOTE: experimental - the torch->ONNX Loop export needs ~60GB RAM for
+      # the 30 Mamba blocks (the exporter unrolls constant-trip loops). If it
+      # fails the release still ships: the enhancement toggle then simply
+      # reports the model as unavailable and reads unenhanced.
       - name: Export NVIDIA RE-USE voice-enhancement model (ONNX int8)
+        continue-on-error: true
         run: |
           set -e
-          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q safetensors onnx onnxruntime numpy
+          pip install -q torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q safetensors onnx "onnxruntime==1.20.1" numpy
           python3 - <<'PYEOF'
           import json, urllib.request, os, sys
           REPO = 'nvidia/RE-USE'

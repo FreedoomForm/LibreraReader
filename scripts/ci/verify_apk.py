@@ -17,7 +17,10 @@ need(lambda x: x == 'assets/kokoro/voices.bin', 'voices.bin present')
 need(lambda x: x == 'assets/kokoro/tokens.txt', 'tokens.txt present')
 need(lambda x: x == 'assets/kokoro/lexicon-us-en.txt', 'misaki-derived lexicon (us-en)')
 need(lambda x: x.startswith('assets/kokoro/espeak-ng-data/'), 'espeak-ng-data files', 300)
-need(lambda x: x == 'assets/reuse/model.int8.onnx', 'RE-USE enhancement model')
+if any(x == 'assets/reuse/model.int8.onnx' for x in names):
+    print('OK: RE-USE enhancement model bundled')
+else:
+    print('WARN: RE-USE enhancement model NOT bundled (export step failed?) - enhancement toggle will report unavailable')
 need(lambda x: x.startswith('lib/arm64-v8a/'), 'arm64-v8a native libs', 2)
 
 so = [x for x in names if x.endswith('libsherpa-onnx-jni.so') and 'arm64' in x]
