@@ -299,15 +299,13 @@ public class AppState {
     }
 
     static {
+        // Only two voices are offered on purpose: the built-in offline AI engine
+        // (Kokoro, needs no install) and the locally installed Google TTS.
+        // Third-party engines (RHVoice, SherpaTTS, Acapela, Vocalizer...) were
+        // removed at the user's request - they duplicated the AI voice and
+        // cluttered the picker.
         TTS_ENGINES.put("Google TTS (local)",
                 "https://play.google.com/store/apps/details?id=com.google.android.tts");
-        TTS_ENGINES.put("Acapela TTS Voices",
-                "https://play.google.com/store/apps/details?id=com.acapelagroup.android.tts");
-        TTS_ENGINES.put("Vocalizer TTS Voice",
-                "https://play.google.com/store/apps/details?id=es.codefactory.vocalizertts");
-        TTS_ENGINES.put("RHVoice",
-                "https://play.google.com/store/apps/details?id=com.github.olga_yakovleva.rhvoice.android");
-        TTS_ENGINES.put("SherpaTTS (F-Droid)", "https://f-droid.org/packages/org.woheller69.ttsengine");
     }
 
     public boolean allowOtherMusic = false;

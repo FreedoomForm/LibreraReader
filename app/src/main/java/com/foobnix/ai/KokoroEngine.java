@@ -52,6 +52,9 @@ public class KokoroEngine {
         int sid;
         float speed;
         long gen;
+        /** TTSEngine word-list epoch at enqueue time: highlight events from an
+         *  older page are dropped instead of marking the wrong page */
+        long epoch;
     }
 
     private volatile OfflineTts tts;
@@ -64,6 +67,14 @@ public class KokoroEngine {
     private volatile AudioTrack track;
     /** bumped by every stop(); items from an older generation are stale */
     private volatile long generation = 0;
+    /** frames written into the current track since it was created (for pacing) */
+    private final java.util.concurrent.atomic.AtomicLong writtenFrames =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    /** generation may never run more than this far ahead of the playhead:
+     *  bounds both the highlight lag and the audio lost on Stop */
+    private static final long MAX_LEAD_MS = 600;
+    /** upper bound for waiting until the playhead drains the buffer */
+    private static final long BARRIER_TIMEOUT_MS = 10000;
     /** consecutive zero-sample generations - 3 in a row trip the system-TTS fallback */
     private final java.util.concurrent.atomic.AtomicInteger zeroStreak =
             new java.util.concurrent.atomic.AtomicInteger(0);
@@ -235,6 +246,7 @@ public class KokoroEngine {
 
     private void enqueue(Item it) {
         it.gen = generation;
+        it.epoch = TTSEngine.get().getTTSWordEpoch();
         queue.add(it);
         ensureWorker();
     }
@@ -310,6 +322,129 @@ public class KokoroEngine {
         }
     }
 
+    /** milliseconds of audio currently buffered ahead of the playhead */
+    private long leadMs(final AudioTrack at, final int sampleRate) {
+        if (at == null || sampleRate <= 0) {
+            return 0;
+        }
+        final long head = at.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        long lead = writtenFrames.get() - head;
+        if (lead < 0) {
+            lead = 0;
+        }
+        return lead * 1000L / sampleRate;
+    }
+
+    /**
+     * Returns a PLAYING track (reusing the session one, rebuilding it once if
+     * the hardware broke it) or null when playback is impossible.
+     */
+    private AudioTrack ensureTrack(final int sampleRate) {
+        AudioTrack at = track;
+        if (at == null) {
+            at = buildTrack(sampleRate);
+            writtenFrames.set(0);
+            track = at;
+        }
+        try {
+            if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                at.play();
+            }
+            return at;
+        } catch (Throwable e) {
+            LOG.e(e);
+            try { at.release(); } catch (Throwable e2) { }
+            if (track == at) {
+                track = null;
+            }
+            try {
+                final AudioTrack fresh = buildTrack(sampleRate);
+                writtenFrames.set(0);
+                track = fresh;
+                fresh.play();
+                android.util.Log.i(DIAG_TAG, "audio track rebuilt after failure");
+                return fresh;
+            } catch (Throwable e3) {
+                LOG.e(e3);
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Waits until the hardware has played everything written so far (or the
+     * wait times out / the session is stopped). Used by barrier items so the
+     * page flip happens exactly when the audio ends, not while seconds of
+     * speech are still buffered.
+     */
+    private void waitDrain(final AudioTrack at, final int sampleRate, final long myGen) {
+        if (at == null) {
+            return;
+        }
+        final long deadline = android.os.SystemClock.elapsedRealtime() + BARRIER_TIMEOUT_MS;
+        while (!aborted && myGen == generation
+                && android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (leadMs(at, sampleRate) <= 0) {
+                break;
+            }
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+    }
+
+    /**
+     * Fires the word-start (highlight) event with the delay of how long the
+     * clip still sits in the playback buffer, so the mark lands on the word
+     * the user actually HEARS at that moment. Skipped when the session was
+     * stopped or the page changed in the meantime.
+     */
+    private void fireStartAt(final String utteranceId, final long delayMs, final long myGen, final long epoch) {
+        final Runnable fire = new Runnable() {
+            public void run() {
+                TTSEngine.get().fireKokoroStart(utteranceId);
+            }
+        };
+        if (delayMs <= 30) {
+            if (!aborted && myGen == generation && TTSEngine.get().getTTSWordEpoch() == epoch) {
+                fire.run();
+            }
+            return;
+        }
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+            public void run() {
+                if (!aborted && myGen == generation && TTSEngine.get().getTTSWordEpoch() == epoch) {
+                    fire.run();
+                }
+            }
+        }, delayMs);
+    }
+
+    /** a chunk of true silence written into the audio stream */
+    private void writeSilence(final AudioTrack at, final int sampleRate, final long ms, final long myGen) {
+        if (at == null || ms <= 0) {
+            return;
+        }
+        long left = (long) (sampleRate * (Math.min(ms, 4000) / 1000f));
+        final float[] zeros = new float[Math.min((int) left, Math.max(sampleRate / 10, 1))];
+        while (left > 0 && !aborted && myGen == generation) {
+            final int n = (int) Math.min(left, zeros.length);
+            try {
+                final int written = at.write(zeros, 0, n, AudioTrack.WRITE_BLOCKING);
+                if (written > 0) {
+                    writtenFrames.addAndGet(written);
+                } else {
+                    break;
+                }
+            } catch (Throwable e) {
+                break;
+            }
+            left -= n;
+        }
+    }
+
     private void runItem(final Item it) {
         try {
             OfflineTts t = tts;
@@ -321,39 +456,27 @@ public class KokoroEngine {
                 aborted = false;
                 android.util.Log.i(DIAG_TAG, "gen start: chars=" + (it.text == null ? -1 : it.text.length()) + ", sid=" + it.sid);
                 final long myGen = it.gen;
-                // ONE track per session: opening a fresh AudioTrack between words
-                // would add a hardware open/close gap to every single word. The
-                // track is drained (stop) after each item so the playback lag
-                // never exceeds one word, and released when the queue empties.
-                AudioTrack tmp = track;
-                if (tmp == null) {
-                    tmp = buildTrack(t.getSampleRate());
-                    track = tmp;
+                final int sampleRate = t.getSampleRate();
+                // ONE track per session, kept PLAYING across items: stop()/play()
+                // between words raced the drain and clipped word tails on real
+                // phones (random garbled sounds). The track is only released when
+                // the queue empties (after a drain) or on stop().
+                final AudioTrack fAt = ensureTrack(sampleRate);
+                if (fAt == null) {
+                    // without a playing track every write() below would fail -
+                    // report an error instead of a silent "done" that flips
+                    // pages with no sound at all
+                    LOG.e(new IllegalStateException("kokoro: AudioTrack is not playable"));
+                    TTSEngine.get().fireKokoroError(it.utteranceId);
+                    return;
                 }
-                // effectively-final alias: fAt is captured by the audio callback
-                final AudioTrack fAt = tmp;
-                boolean canPlay = true;
-                try {
-                    if (fAt.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
-                        fAt.play();
-                    }
-                } catch (Throwable e) {
-                    // without a playing track every write() below would fail and
-                    // abort the generation instantly - report an error instead of
-                    // a silent "done" that flips pages with no sound at all
-                    LOG.e(e);
-                    canPlay = false;
-                    // drop the broken track so the next item gets a fresh one
-                    try { fAt.release(); } catch (Throwable e2) { }
-                    if (track == fAt) {
-                        track = null;
-                    }
-                }
-                final boolean playOk = canPlay;
                 final long[] pcm = new long[1];
                 final java.util.concurrent.atomic.AtomicBoolean gotAudio =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 final java.util.concurrent.atomic.AtomicBoolean genDone =
+                        new java.util.concurrent.atomic.AtomicBoolean(false);
+                /** fires the highlight event exactly once, at the first written chunk */
+                final java.util.concurrent.atomic.AtomicBoolean startFired =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 final long genStart = android.os.SystemClock.elapsedRealtime();
                 // Run the native synthesis on a DEDICATED thread: a stuck generate
@@ -362,23 +485,45 @@ public class KokoroEngine {
                 final Thread genThread = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            if (playOk) {
-                                t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
-                                    public Integer invoke(float[] samples) {
-                                        if (aborted || myGen != generation || fAt == null) {
-                                            return 0;
-                                        }
-                                        try {
-                                            fAt.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
-                                            pcm[0] += samples.length;
-                                            gotAudio.set(true);
-                                        } catch (Throwable e) {
-                                            return 0;
-                                        }
-                                        return 1;
+                            t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
+                                public Integer invoke(float[] samples) {
+                                    if (aborted || myGen != generation) {
+                                        return 0;
                                     }
-                                });
-                            }
+                                    try {
+                                        // pacing: never generate more than MAX_LEAD_MS
+                                        // ahead of the playhead. This keeps the voice
+                                        // flowing in real time AND keeps the pauses in
+                                        // the audio (a generation-run-ahead buffer used
+                                        // to fire whole groups of phrases back to back)
+                                        while (!aborted && myGen == generation) {
+                                            if (leadMs(fAt, sampleRate) <= MAX_LEAD_MS) {
+                                                break;
+                                            }
+                                            Thread.sleep(15);
+                                        }
+                                        if (aborted || myGen != generation) {
+                                            return 0;
+                                        }
+                                        // highlight when the sound is actually heard,
+                                        // delayed by whatever is still buffered
+                                        if (startFired.compareAndSet(false, true)) {
+                                            fireStartAt(it.utteranceId, leadMs(fAt, sampleRate), myGen, it.epoch);
+                                        }
+                                        final int written = fAt.write(samples, 0, samples.length,
+                                                AudioTrack.WRITE_BLOCKING);
+                                        if (written <= 0) {
+                                            return 0;
+                                        }
+                                        pcm[0] += written;
+                                        writtenFrames.addAndGet(written);
+                                        gotAudio.set(true);
+                                    } catch (Throwable e) {
+                                        return 0;
+                                    }
+                                    return 1;
+                                }
+                            });
                         } catch (Throwable e) {
                             LOG.e(e);
                         } finally {
@@ -390,10 +535,6 @@ public class KokoroEngine {
                 try {
                     genThread.setDaemon(true);
                 } catch (Throwable e) {
-                }
-                // tell the UI the word is being spoken right now (word highlight)
-                if (!aborted && myGen == generation) {
-                    TTSEngine.get().fireKokoroStart(it.utteranceId);
                 }
                 genThread.start();
                 // Kill-switches: no FIRST audio (default 60s) or a stalled stream
@@ -453,13 +594,13 @@ public class KokoroEngine {
                     android.util.Log.i(DIAG_TAG, "gen done: " + pcm[0] + " samples, RTF "
                             + String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
-                // let the just-generated audio play out and keep the track for
-                // the next word; release it only when nothing else is queued
-                try { fAt.stop(); } catch (Throwable e) { }
+                // keep the track playing for the next item; release it only when
+                // nothing else is queued and the tail has actually played out
                 if (queue.isEmpty()) {
-                    try { fAt.release(); } catch (Throwable e) { }
-                    if (track == fAt) {
+                    waitDrain(fAt, sampleRate, myGen);
+                    if (queue.isEmpty() && track == fAt) {
                         track = null;
+                        try { fAt.release(); } catch (Throwable e) { }
                     }
                 }
                 generating = false;
@@ -487,13 +628,38 @@ public class KokoroEngine {
                 }
             } else {
                 aborted = false;
-                long left = it.silenceMs;
-                while (left > 0 && !aborted && it.gen == generation) {
-                    long step = Math.min(50, left);
-                    Thread.sleep(step);
-                    left -= step;
+                final long myGen = it.gen;
+                final int sampleRate = t.getSampleRate();
+                AudioTrack at = track;
+                if (it.silenceMs > 0) {
+                    // the pause must live in the AUDIO, not in a generation-thread
+                    // sleep: a sleep vanishes whenever generation runs ahead of
+                    // playback, which glued whole phrases together ("speaks 5
+                    // phrases at once"). Skipped when we are behind anyway (RTF>1
+                    // device - no extra gap on top of the synthesis lag).
+                    if (at != null && leadMs(at, sampleRate) > 40) {
+                        try {
+                            if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                                at.play();
+                            }
+                        } catch (Throwable e) {
+                            LOG.e(e);
+                        }
+                        writeSilence(at, sampleRate, it.silenceMs, myGen);
+                    }
+                } else if (at != null) {
+                    // barrier (0 ms): paragraph counter and the page flip must
+                    // land when the audio actually ends, not while seconds of
+                    // speech are still buffered - otherwise every page tail is
+                    // cut off by the next stopInternal()
+                    waitDrain(at, sampleRate, myGen);
                 }
-                if (!aborted && it.gen == generation) {
+                if (queue.isEmpty() && track != null && track.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                    final AudioTrack dead = track;
+                    track = null;
+                    try { dead.release(); } catch (Throwable e) { }
+                }
+                if (!aborted && myGen == generation) {
                     TTSEngine.get().fireKokoroDone(it.utteranceId);
                 }
             }
@@ -572,9 +738,9 @@ public class KokoroEngine {
         if (minBuf <= 0) {
             minBuf = 16384;
         }
-        // float PCM is 4 bytes per frame: keep 4 SECONDS of audio buffered
-        // (sampleRate*4 bytes is only 1s — it underruns on slow devices)
-        int buf = Math.max(minBuf, sampleRate * 4 * 4);
+        // float PCM is 4 bytes per frame: 2 seconds is plenty because generation
+        // is paced to stay MAX_LEAD_MS ahead of the playhead
+        int buf = Math.max(minBuf, sampleRate * 2 * 4);
         return new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)

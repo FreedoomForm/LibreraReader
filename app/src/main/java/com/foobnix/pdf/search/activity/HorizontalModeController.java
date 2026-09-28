@@ -525,8 +525,10 @@ public abstract class HorizontalModeController extends DocumentController {
     /**
      * Word-by-word TTS reading: reuse the search-highlight mechanism
      * (PageImageState selected words) to mark the word being spoken.
+     * The exact rectangle comes with the event (captured from the same word
+     * boxes the TTS aligns against); the index is only a fallback.
      */
-    @Override public void highlightTTSWord(final int page, final int wordIndex) {
+    @Override public void highlightTTSWord(final int page, final int wordIndex, final android.graphics.RectF rect) {
         try {
             if (wordIndex < 0) {
                 PageImageState.get()
@@ -535,28 +537,33 @@ public abstract class HorizontalModeController extends DocumentController {
                         .post(new InvalidateMessage());
                 return;
             }
-            final TextWord[][] texts = getPageText(page);
-            if (texts == null) {
-                return;
-            }
             TextWord found = null;
-            int k = 0;
-            for (final TextWord[] line : texts) {
-                if (line == null) {
-                    continue;
+            if (rect != null) {
+                found = new TextWord();
+                found.set(rect.left, rect.top, rect.right, rect.bottom);
+            } else {
+                final TextWord[][] texts = getPageText(page);
+                if (texts == null) {
+                    return;
                 }
-                for (final TextWord w : line) {
-                    if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                int k = 0;
+                for (final TextWord[] line : texts) {
+                    if (line == null) {
                         continue;
                     }
-                    if (k == wordIndex) {
-                        found = w;
+                    for (final TextWord w : line) {
+                        if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                            continue;
+                        }
+                        if (k == wordIndex) {
+                            found = w;
+                            break;
+                        }
+                        k++;
+                    }
+                    if (found != null) {
                         break;
                     }
-                    k++;
-                }
-                if (found != null) {
-                    break;
                 }
             }
             if (found == null) {

@@ -103,6 +103,7 @@ import com.foobnix.pdf.search.view.VerticalViewPager;
 import com.foobnix.sys.ClickUtils;
 import com.foobnix.sys.TempHolder;
 import com.foobnix.tts.MessagePageNumber;
+import com.foobnix.tts.MessageTTSWord;
 import com.foobnix.tts.TTSControlsView;
 import com.foobnix.tts.TTSEngine;
 import com.foobnix.tts.TTSNotification;
@@ -1401,6 +1402,22 @@ public class HorizontalViewActivity extends AdsFragmentActivity {
         try {
             showTtsControls();
             dc.onGoToPage(event.getPage() + 1);
+        } catch (Exception e) {
+            LOG.e(e);
+        }
+    }
+
+    /**
+     * Word-by-word TTS reading: highlight the word being spoken on the page
+     * image (the search-highlight mechanism). This subscription used to be
+     * missing in the horizontal viewer, so the highlight never appeared here.
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onTTSWord(MessageTTSWord event) {
+        try {
+            if (dc != null) {
+                dc.highlightTTSWord(event.getPage(), event.getWordIndex(), event.getRect());
+            }
         } catch (Exception e) {
             LOG.e(e);
         }

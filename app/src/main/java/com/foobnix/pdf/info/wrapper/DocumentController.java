@@ -712,8 +712,10 @@ public abstract class DocumentController {
      *
      * @param page      0-based book page index
      * @param wordIndex flat index into the page's reading-order word list; -1 clears
+     * @param rect      the word's rectangle in page coordinates (may be null, then
+     *                  the index is used to find the word)
      */
-    public void highlightTTSWord(final int page, final int wordIndex) {
+    public void highlightTTSWord(final int page, final int wordIndex, final android.graphics.RectF rect) {
     }
 
     public String getBookmarkText() {

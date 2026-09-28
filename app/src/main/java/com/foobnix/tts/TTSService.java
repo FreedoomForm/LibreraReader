@@ -1157,7 +1157,8 @@ import java.util.List;
                                                  utteranceId.substring(TTSEngine.WORD_SIGNAL.length()));
                                          if (idx >= 0) {
                                              EventBus.getDefault()
-                                                     .post(new MessageTTSWord(AppSP.get().lastBookPage, idx));
+                                                     .post(new MessageTTSWord(AppSP.get().lastBookPage, idx,
+                                                             TTSEngine.get().getTTSWordRect(idx)));
                                          }
                                      } catch (NumberFormatException e) {
                                          LOG.d(TAG, "bad word utterance id", utteranceId);

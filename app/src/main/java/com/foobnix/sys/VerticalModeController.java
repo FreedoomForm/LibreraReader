@@ -195,9 +195,13 @@ public class VerticalModeController extends DocumentController {
     /**
      * Word-by-word TTS reading: mark the word currently being spoken so the
      * page renderer draws its selection rectangle (EventDraw.drawSelectedText).
+     * The exact rectangle comes with the event - it was captured from the same
+     * word boxes the TTS aligns against, so no page re-read is needed (the old
+     * index lookup used to fail for reflowed books, where the TTS service and
+     * the viewer paginate differently).
      */
     @Override
-    public void highlightTTSWord(final int page, final int wordIndex) {
+    public void highlightTTSWord(final int page, final int wordIndex, final android.graphics.RectF rect) {
         try {
             if (ctr == null || ctr.getDocumentModel() == null || ctr.getDocumentController() == null) {
                 return;
@@ -213,34 +217,39 @@ public class VerticalModeController extends DocumentController {
                 }
                 return;
             }
-            // fetch the page words (also fills page.texts for the renderer)
-            TextWord[][] texts = null;
-            if (ctr.getDecodeService() != null) {
-                texts = ctr.getDecodeService().getTextForPage(page);
-            }
-            if (texts == null) {
-                return;
-            }
             TextWord found = null;
-            int k = 0;
-            // the flat order must match the one the TTS service built
-            // (skipping null/empty words)
-            for (final TextWord[] line : texts) {
-                if (line == null) {
-                    continue;
+            if (rect != null) {
+                found = new TextWord();
+                found.set(rect.left, rect.top, rect.right, rect.bottom);
+            } else {
+                // fallback: find the word by its flat index
+                TextWord[][] texts = null;
+                if (ctr.getDecodeService() != null) {
+                    texts = ctr.getDecodeService().getTextForPage(page);
                 }
-                for (final TextWord w : line) {
-                    if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                if (texts == null) {
+                    return;
+                }
+                int k = 0;
+                // the flat order must match the one the TTS service built
+                // (skipping null/empty words)
+                for (final TextWord[] line : texts) {
+                    if (line == null) {
                         continue;
                     }
-                    if (k == wordIndex) {
-                        found = w;
+                    for (final TextWord w : line) {
+                        if (w == null || TxtUtils.isEmpty(w.getWord())) {
+                            continue;
+                        }
+                        if (k == wordIndex) {
+                            found = w;
+                            break;
+                        }
+                        k++;
+                    }
+                    if (found != null) {
                         break;
                     }
-                    k++;
-                }
-                if (found != null) {
-                    break;
                 }
             }
             if (found == null) {

@@ -433,7 +433,7 @@ public class DocumentWrapperUI {
     public void onTTSWord(MessageTTSWord event) {
         try {
             if (dc != null) {
-                dc.highlightTTSWord(event.getPage(), event.getWordIndex());
+                dc.highlightTTSWord(event.getPage(), event.getWordIndex(), event.getRect());
             }
         } catch (Exception e) {
             LOG.e(e);

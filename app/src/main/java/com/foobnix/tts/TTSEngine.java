@@ -369,11 +369,34 @@ public class TTSEngine {
      */
     private volatile java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> ttsSourceWords;
     private volatile int ttsSourceOffset = 0;
+    /** bumped whenever the source word list is replaced (page change) - stale
+     *  highlight events are dropped instead of marking the wrong page */
+    private final java.util.concurrent.atomic.AtomicLong ttsWordEpoch =
+            new java.util.concurrent.atomic.AtomicLong(0);
 
     public void setTTSSourceWords(final java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> words,
                                   final int preTextTokens) {
         this.ttsSourceWords = words;
         this.ttsSourceOffset = Math.max(0, preTextTokens);
+        this.ttsWordEpoch.incrementAndGet();
+    }
+
+    /** epoch of the current page word list (changes on every page change) */
+    public long getTTSWordEpoch() {
+        return ttsWordEpoch.get();
+    }
+
+    /**
+     * @return a copy of the page-word rectangle for the flat index, or null -
+     * used to highlight the exact word being spoken without re-reading the
+     * page on the UI thread.
+     */
+    public android.graphics.RectF getTTSWordRect(final int flat) {
+        final java.util.List<org.ebookdroid.droids.mupdf.codec.TextWord> src = ttsSourceWords;
+        if (src == null || flat < 0 || flat >= src.size()) {
+            return null;
+        }
+        return new android.graphics.RectF(src.get(flat));
     }
 
     /**
@@ -555,6 +578,14 @@ public class TTSEngine {
         if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
             ttsEngine.playSilence(0l, TextToSpeech.QUEUE_FLUSH, mapTemp);
+            final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+            if (AppState.get().ttsWordMode) {
+                // resuming mid-page: skip the words of the paragraphs before the
+                // resume point (they belong to earlier highlights)
+                for (int i = 0; i < AppSP.get().lastBookParagraph && i < parts.length; i++) {
+                    advanceAlign(parts[i] == null ? "" : parts[i], sysAlign);
+                }
+            }
             for (int i = AppSP.get().lastBookParagraph; i < parts.length; i++) {
 
                 String big = parts[i];
@@ -582,19 +613,47 @@ public class TTSEngine {
                         break;
                     }
 
-                    HashMap<String, String> mapTemp1 = new HashMap<String, String>();
-                    mapTemp1.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + i);
+                    if (AppState.get().ttsWordMode) {
+                        enqueueWordsSystem(ttsEngine, big, i, sysAlign);
+                    } else {
+                        HashMap<String, String> mapTemp1 = new HashMap<String, String>();
+                        mapTemp1.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + i);
 
-                    ttsEngine.speak(big, TextToSpeech.QUEUE_ADD, mapTemp1);
-                    ttsEngine.playSilence(AppState.get().ttsPauseDuration, TextToSpeech.QUEUE_ADD, mapTemp);
-                    LOG.d("pageHTML-parts", i, big);
+                        ttsEngine.speak(big, TextToSpeech.QUEUE_ADD, mapTemp1);
+                        ttsEngine.playSilence(AppState.get().ttsPauseDuration, TextToSpeech.QUEUE_ADD, mapTemp);
+                        LOG.d("pageHTML-parts", i, big);
+                    }
                 }
             }
             ttsEngine.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
         } else {
             String textToPlay = text.replace(TxtUtils.TTS_PAUSE, "");
             LOG.d("pageHTML-parts-single", text);
-            ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
+            if (AppState.get().ttsWordMode) {
+                // word-by-word with the system voice too: one tiny utterance per
+                // word gives the progress listener a start event per word, which
+                // drives the on-page word highlight
+                final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+                final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
+                final boolean[] first = {true};
+                forEachWordToken(textToPlay, sysAlign, new WordSink() {
+                    @Override public void accept(final String word, final int flat) {
+                        HashMap<String, String> wm = new HashMap<String, String>();
+                        wm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, WORD_SIGNAL + flat);
+                        ttsEngine.speak(word, first[0] ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, wm);
+                        first[0] = false;
+                        ttsEngine.playSilence(wordPauseMs, TextToSpeech.QUEUE_ADD, mapTemp);
+                    }
+                });
+                if (first[0]) {
+                    // not a single readable token: keep the page turning
+                    ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
+                } else {
+                    ttsEngine.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
+                }
+            } else {
+                ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
+            }
         }
 
     }
@@ -1049,25 +1108,24 @@ public class TTSEngine {
         }
     }
 
+    /** consumer of one readable word token with its flat page index */
+    private interface WordSink {
+        void accept(final String word, final int flat);
+    }
+
     /**
-     * Real-time word-by-word reading: every word becomes its own tiny
-     * utterance. A one-word clip synthesizes in tens of milliseconds, so the
-     * AI voice starts speaking almost instantly after Play and long sentences
-     * (the historical Kokoro hang) never reach the synthesizer at once.
-     * The utterance id "ttsW<flatIdx>" lets the reader view highlight the
-     * word while it is spoken.
+     * Walks the readable tokens of a paragraph in reading order and feeds each
+     * one to the sink together with its flat index in the page's word list
+     * (-1 for tokens carried over from the previous page or unmatched).
      */
-    private void enqueueWordsRealtime(final KokoroEngine kok, final String paragraph, final int paragraphIndex,
-                                      final int sid, final float speed, final WordAlign align) {
-        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
-        final String[] words = paragraph.split("\\s+");
-        for (final String w : words) {
+    private void forEachWordToken(final String paragraph, final WordAlign align, final WordSink sink) {
+        for (final String w : paragraph.split("\\s+")) {
             if (TxtUtils.isEmpty(w)) {
                 continue;
             }
             if (normalizeWord(w).isEmpty()) {
-                // punctuation-only token: the synthesizer would produce no
-                // audio for it (and pointless queue items), just skip it
+                // punctuation-only token: the synthesizers produce no audio for
+                // it (and Kokoro garbles it) - just skip it
                 continue;
             }
             final int flat;
@@ -1080,9 +1138,59 @@ public class TTSEngine {
                     align.pagePtr = flat + 1;
                 }
             }
-            kok.enqueueSpeak(w, WORD_SIGNAL + flat, sid, speed);
-            kok.enqueueSilence(wordPauseMs, "Temp", sid, speed);
+            sink.accept(w, flat);
         }
+    }
+
+    /** advances the aligner over every token of the given text (resume support) */
+    private void advanceAlign(final String text, final WordAlign align) {
+        forEachWordToken(text, align, new WordSink() {
+            @Override public void accept(final String word, final int flat) {
+            }
+        });
+    }
+
+    /**
+     * Word-by-word reading with the SYSTEM voice: one tiny utterance per word
+     * so the UtteranceProgressListener.onStart("ttsW<idx>") highlights the word
+     * being spoken - the same protocol the offline AI voice uses.
+     */
+    private void enqueueWordsSystem(final TextToSpeech engine, final String paragraph,
+                                    final int paragraphIndex, final WordAlign align) {
+        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
+        forEachWordToken(paragraph, align, new WordSink() {
+            @Override public void accept(final String word, final int flat) {
+                HashMap<String, String> wm = new HashMap<String, String>();
+                wm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, WORD_SIGNAL + flat);
+                engine.speak(word, TextToSpeech.QUEUE_ADD, wm);
+                engine.playSilence(wordPauseMs, TextToSpeech.QUEUE_ADD, mapTemp);
+            }
+        });
+        if (paragraphIndex >= 0) {
+            // keep the resume protocol: paragraph i finished
+            HashMap<String, String> fm = new HashMap<String, String>();
+            fm.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + paragraphIndex);
+            engine.playSilence(0, TextToSpeech.QUEUE_ADD, fm);
+        }
+    }
+
+    /**
+     * Real-time word-by-word reading: every word becomes its own tiny
+     * utterance. A one-word clip synthesizes in tens of milliseconds, so the
+     * AI voice starts speaking almost instantly after Play and long sentences
+     * (the historical Kokoro hang) never reach the synthesizer at once.
+     * The utterance id "ttsW<flatIdx>" lets the reader view highlight the
+     * word while it is spoken.
+     */
+    private void enqueueWordsRealtime(final KokoroEngine kok, final String paragraph, final int paragraphIndex,
+                                      final int sid, final float speed, final WordAlign align) {
+        final long wordPauseMs = Math.max(20, Math.min(AppState.get().ttsPauseDuration, 150));
+        forEachWordToken(paragraph, align, new WordSink() {
+            @Override public void accept(final String word, final int flat) {
+                kok.enqueueSpeak(word, WORD_SIGNAL + flat, sid, speed);
+                kok.enqueueSilence(wordPauseMs, "Temp", sid, speed);
+            }
+        });
         if (paragraphIndex >= 0) {
             // keep the resume protocol: paragraph i finished
             kok.enqueueSilence(0, FINISHED_SIGNAL + paragraphIndex, sid, speed);
