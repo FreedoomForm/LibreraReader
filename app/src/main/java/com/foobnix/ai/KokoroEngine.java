@@ -12,31 +12,39 @@ import com.foobnix.LibreraApp;
 import com.foobnix.android.utils.LOG;
 import com.foobnix.pdf.info.R;
 import com.foobnix.tts.TTSEngine;
-import com.k2fsa.sherpa.onnx.GeneratedAudio;
-import com.k2fsa.sherpa.onnx.OfflineTts;
-import com.k2fsa.sherpa.onnx.OfflineTtsCallback;
-import com.k2fsa.sherpa.onnx.OfflineTtsConfig;
-import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig;
-import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.nio.FloatBuffer;
+import java.nio.LongBuffer;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import ai.onnxruntime.OnnxTensor;
+import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtSession;
+
 /**
- * Offline AI TTS engine: Kokoro-7M-Distill (int8, ~8.7 MB) through sherpa-onnx.
- * The model ships inside the APK assets (assets/kokoro) and is unpacked to
- * filesDir/kokoro on first use, so the reader works fully offline. The 7M
- * distilled model is 25x smaller and ~4x faster than the previous 82M build
- * (RTF ~0.2 on 4 CPU threads).
+ * Offline AI TTS engine: Inflect-Nano-v2 (VITS, 24 kHz, en-us, ~16 MB fp32)
+ * executed through the ONNX Runtime that is already in the APK. The split
+ * export (duration.onnx + decode.onnx) comes from the official
+ * owensong/Inflect-Nano-v2-ONNX repository; the text frontend
+ * ({@link InflectFrontend}) mirrors the model's own python pipeline using a
+ * precomputed espeak lexicon, so no espeak-ng is needed on the device.
+ * <p>
+ * The model ships inside the APK assets (assets/inflect) and is unpacked to
+ * filesDir/inflect on first use, so the reader works fully offline.
+ * RTF ~0.2 on a weak sandbox core (single thread); the class name and the
+ * public API predate the model swap (this used to be Kokoro-7M-Distill via
+ * sherpa-onnx) and are kept so the reader/services/UI stay untouched.
  */
 public class KokoroEngine {
-    public static final String MODEL_VERSION = "kokoro-7m-distill-int8-v1";
+    public static final String MODEL_VERSION = "inflect-nano-v2-onnx-v1";
+    public static final int SAMPLE_RATE = 24000;
     private static final String TAG = "KokoroEngine";
     /** always-on log tag: visible even in release builds (LOG.* is compiled out) */
     public static final String DIAG_TAG = "KokoroDiag";
@@ -67,7 +75,15 @@ public class KokoroEngine {
         float[] weights;
     }
 
-    private volatile OfflineTts tts;
+    /** streaming synthesis sink: return 0 to abort (sherpa callback contract) */
+    public interface SynthCallback {
+        Integer invoke(float[] samples);
+    }
+
+    private volatile OrtEnvironment ortEnv;
+    private volatile OrtSession durSession;
+    private volatile OrtSession decSession;
+    private volatile InflectFrontend frontend;
     private volatile boolean ready = false;
     private volatile boolean preparing = false;
     private final java.util.concurrent.atomic.AtomicInteger workerScheduled =
@@ -103,7 +119,7 @@ public class KokoroEngine {
     private final java.util.List<Runnable> pendingOnReady = new java.util.concurrent.CopyOnWriteArrayList<Runnable>();
 
     public boolean isReady() {
-        return ready && tts != null;
+        return ready && durSession != null;
     }
 
     public boolean isBusy() {
@@ -142,7 +158,7 @@ public class KokoroEngine {
                     long initStart = android.os.SystemClock.elapsedRealtime();
                     prepareInternal();
                     android.util.Log.i(DIAG_TAG, "kokoro init OK in "
-                            + (android.os.SystemClock.elapsedRealtime() - initStart) + " ms, sampleRate=" + tts.getSampleRate());
+                            + (android.os.SystemClock.elapsedRealtime() - initStart) + " ms, sampleRate=" + SAMPLE_RATE);
                     for (Runnable r : pendingOnReady) {
                         try {
                             r.run();
@@ -182,45 +198,30 @@ public class KokoroEngine {
         }
         LOG.d(TAG, "prepare start");
         File dir = extractModel();
-        android.util.Log.i(DIAG_TAG, "model ready: model.int8.onnx=" + new File(dir, "model.int8.onnx").length() + " bytes");
-        OfflineTtsKokoroModelConfig k = OfflineTtsKokoroModelConfig.builder()
-                .setModel(new File(dir, "model.int8.onnx").getAbsolutePath())
-                .setVoices(new File(dir, "voices.bin").getAbsolutePath())
-                .setTokens(new File(dir, "tokens.txt").getAbsolutePath())
-                .setDataDir(new File(dir, "espeak-ng-data").getAbsolutePath())
-                // The 7M student was distilled on misaki phonemes. The model is
-                // stamped version=2 so the (patched) runtime loads the
-                // misaki-derived lexicon for in-vocabulary words and uses
-                // espeak-ng only for OOV fallback. Raw espeak for every word
-                // would mispronounce the diphthong tokens (A/W/O) the model
-                // was trained on and shorten durations by up to ~37%.
-                .setLexicon(new File(dir, "lexicon-us-en.txt").getAbsolutePath())
-                .build();
-        // synthesis is the heavy part: give ONNX as many cores as we can spare
-        // (all but one on big phones; 2 on a weak 4-core device)
-        int cores = Runtime.getRuntime().availableProcessors();
-        int onnxThreads = Math.max(2, Math.min(6, cores - 1));
-        LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
-        OfflineTtsModelConfig m = OfflineTtsModelConfig.builder()
-                .setKokoro(k)
-                .setNumThreads(onnxThreads)
-                .setDebug(false)
-                .build();
-        OfflineTtsConfig c = OfflineTtsConfig.builder()
-                .setModel(m)
-                .build();
-        OfflineTts t = new OfflineTts(c);
-        OfflineTts old = tts;
-        tts = t;
-        ready = true;
-        if (old != null) {
-            try {
-                old.release();
-            } catch (Throwable e) {
-                LOG.e(e);
-            }
+        android.util.Log.i(DIAG_TAG, "model ready: duration.onnx=" + new File(dir, "duration.onnx").length()
+                + " decode.onnx=" + new File(dir, "decode.onnx").length()
+                + " lexicon=" + new File(dir, "lexicon-en.txt").length());
+        ortEnv = OrtEnvironment.getEnvironment();
+        OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
+        try {
+            // synthesis is the heavy part: give ONNX as many cores as we can spare
+            // (all but one on big phones; 2 on a weak 4-core device)
+            int cores = Runtime.getRuntime().availableProcessors();
+            int onnxThreads = Math.max(2, Math.min(6, cores - 1));
+            opts.setIntraOpNumThreads(onnxThreads);
+            LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
+        } catch (Throwable t) {
+            LOG.e(t);
         }
-        LOG.d(TAG, "prepare done, sampleRate", t.getSampleRate());
+        OrtSession dur = ortEnv.createSession(new File(dir, "duration.onnx").getAbsolutePath(), opts);
+        OrtSession dec = ortEnv.createSession(new File(dir, "decode.onnx").getAbsolutePath(), opts);
+        InflectFrontend fe = new InflectFrontend(new File(dir, "lexicon-en.txt"));
+        android.util.Log.i(DIAG_TAG, "inflect frontend ready: " + fe.lexiconSize() + " words");
+        durSession = dur;
+        decSession = dec;
+        frontend = fe;
+        ready = true;
+        LOG.d(TAG, "prepare done, sampleRate", SAMPLE_RATE);
     }
 
     public void stopInternal() {
@@ -239,10 +240,22 @@ public class KokoroEngine {
     public void release() {
         stopInternal();
         ready = false;
-        OfflineTts t = tts;
-        tts = null;
-        if (t != null) {
-            try { t.release(); } catch (Throwable e) { }
+        OrtSession dur = durSession;
+        OrtSession dec = decSession;
+        durSession = null;
+        decSession = null;
+        frontend = null;
+        close(dur);
+        close(dec);
+    }
+
+    private static void close(OrtSession s) {
+        if (s != null) {
+            try {
+                s.close();
+            } catch (Throwable e) {
+                LOG.e(e);
+            }
         }
     }
 
@@ -300,12 +313,10 @@ public class KokoroEngine {
     }
 
     public void generateToWav(String text, int sid, float speed, String path) throws Throwable {
-        OfflineTts t = tts;
-        if (t == null) {
-            throw new IllegalStateException("Kokoro engine is not ready");
+        TtsAudio audio = generateForDiag(text, sid, speed);
+        if (!audio.save(path)) {
+            throw new IllegalStateException("failed to write " + path);
         }
-        GeneratedAudio audio = t.generate(text, sid, speed);
-        audio.save(path);
     }
 
     /**
@@ -650,8 +661,7 @@ public class KokoroEngine {
 
     private void runItem(final Item it) {
         try {
-            OfflineTts t = tts;
-            if (t == null || it.gen != generation) {
+            if (it.gen != generation) {
                 return; // stale item dropped after stop()
             }
             if (it.isSpeak) {
@@ -659,7 +669,7 @@ public class KokoroEngine {
                 aborted = false;
                 android.util.Log.i(DIAG_TAG, "gen start: chars=" + (it.text == null ? -1 : it.text.length()) + ", sid=" + it.sid);
                 final long myGen = it.gen;
-                final int sampleRate = t.getSampleRate();
+                final int sampleRate = SAMPLE_RATE;
                 // ONE track per session, kept PLAYING across items: stop()/play()
                 // between words raced the drain and clipped word tails on real
                 // phones (random garbled sounds). The track is only released when
@@ -695,7 +705,7 @@ public class KokoroEngine {
                 final Thread genThread = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            t.generateWithCallback(it.text, it.sid, it.speed, new OfflineTtsCallback() {
+                            generateStream(it.text, it.speed, new SynthCallback() {
                                 public Integer invoke(float[] samples) {
                                     if (aborted || myGen != generation) {
                                         return 0;
@@ -804,7 +814,7 @@ public class KokoroEngine {
                     return;
                 }
                 if (pcm[0] > 0) {
-                    float audioSec = pcm[0] / (float) t.getSampleRate();
+                    float audioSec = pcm[0] / (float) SAMPLE_RATE;
                     float genSec = (android.os.SystemClock.elapsedRealtime() - genStart) / 1000f;
                     // RTF < 1 means synthesis outpaces playback (no stutter)
                     LOG.d(TAG, "kokoro gen", String.format("%.1f", genSec), "s for",
@@ -853,7 +863,7 @@ public class KokoroEngine {
             } else {
                 aborted = false;
                 final long myGen = it.gen;
-                final int sampleRate = t.getSampleRate();
+                final int sampleRate = SAMPLE_RATE;
                 AudioTrack at = track;
                 if (it.silenceMs > 0) {
                     // the pause must live in the AUDIO, not in a generation-thread
@@ -900,19 +910,213 @@ public class KokoroEngine {
     }
 
     public int getSampleRate() {
-        OfflineTts t = tts;
-        return t == null ? 0 : t.getSampleRate();
+        return SAMPLE_RATE;
+    }
+
+    /**
+     * Inflect-Nano-v2 synthesis: normalize -> lexicon IPA -> tokens ->
+     * duration.onnx -> decode.onnx, streamed to the callback per sentence
+     * chunk with the reference runner's boundary pauses and edge fades.
+     * A callback return value of 0 aborts the rest of the text.
+     */
+    private void generateStream(String text, float speed, SynthCallback cb) throws Throwable {
+        InflectFrontend fe = frontend;
+        OrtSession dur = durSession;
+        OrtSession dec = decSession;
+        if (fe == null || dur == null || dec == null) {
+            throw new IllegalStateException("Inflect engine is not ready");
+        }
+        final float sp = Math.max(0.5f, Math.min(2.0f, speed <= 0 ? 1f : speed));
+        final float lengthScale = 1f / sp;
+        List<String> chunks = InflectFrontend.splitSentences(text);
+        if (chunks.isEmpty()) {
+            return;
+        }
+        OrtSession.Result durRes = null;
+        OrtSession.Result decRes = null;
+        Map<String, OnnxTensor> durInputs = new LinkedHashMap<String, OnnxTensor>();
+        Map<String, OnnxTensor> decInputs = new LinkedHashMap<String, OnnxTensor>();
+        try {
+            for (int i = 0; i < chunks.size(); i++) {
+                if (aborted) {
+                    return;
+                }
+                String chunk = chunks.get(i);
+                if (i > 0) {
+                    // boundary pause lives in the audio stream (plays as silence)
+                    int pauseLen = Math.round(SAMPLE_RATE * InflectFrontend.boundaryPauseSec(chunks.get(i - 1)));
+                    int written = writeZeros(cb, pauseLen);
+                    if (written == 0 && aborted) {
+                        return;
+                    }
+                }
+                String phones = fe.phonemize(chunk);
+                if (phones == null) {
+                    continue;
+                }
+                long[] ids = InflectFrontend.toTokenIds(phones);
+                if (ids == null || ids.length < 4) {
+                    continue;
+                }
+                durInputs.put("tokens", OnnxTensor.createTensor(ortEnv,
+                        LongBuffer.wrap(ids), new long[]{1, ids.length}));
+                durInputs.put("lengths", OnnxTensor.createTensor(ortEnv,
+                        LongBuffer.wrap(new long[]{ids.length}), new long[]{1}));
+                durInputs.put("length_scale", OnnxTensor.createTensor(ortEnv,
+                        FloatBuffer.wrap(new float[]{lengthScale}), new long[]{}));
+                try {
+                    durRes = dur.run(durInputs);
+                    OnnxTensor mT = (OnnxTensor) durRes.get("m_p_exp").orElse(null);
+                    OnnxTensor logsT = (OnnxTensor) durRes.get("logs_p_exp").orElse(null);
+                    OnnxTensor maskT = (OnnxTensor) durRes.get("y_mask").orElse(null);
+                    if (mT == null || logsT == null || maskT == null) {
+                        continue;
+                    }
+                    long[] mShape = mT.getInfo().getShape();
+                    float[] m = flat(mT);
+                    float[] logs = flat(logsT);
+                    float[] mask = flat(maskT);
+                    if (m == null) {
+                        continue;
+                    }
+                    // gaussian latent noise, seeded per chunk (reference: seed + index)
+                    Random rng = new Random(1000L + i);
+                    float[] noise = new float[m.length];
+                    for (int k = 0; k < noise.length; k++) {
+                        noise[k] = (float) rng.nextGaussian();
+                    }
+                    decInputs.put("m_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(m), mShape));
+                    decInputs.put("logs_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(logs), mShape));
+                    decInputs.put("y_mask", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(mask),
+                            new long[]{1, 1, mShape.length > 2 ? mShape[2] : 0}));
+                    decInputs.put("zp_noise", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(noise), mShape));
+                    decInputs.put("noise_scale", OnnxTensor.createTensor(ortEnv,
+                            FloatBuffer.wrap(new float[]{0.667f}), new long[]{}));
+                    try {
+                        decRes = dec.run(decInputs);
+                        OnnxTensor wavT = (OnnxTensor) decRes.get("waveform").orElse(null);
+                        if (wavT == null) {
+                            continue;
+                        }
+                        float[] wav = flat(wavT);
+                        if (wav == null || wav.length == 0) {
+                            continue;
+                        }
+                        edgeFade(wav, SAMPLE_RATE, 5);
+                        final int SLICE = 4800;
+                        int off = 0;
+                        while (off < wav.length) {
+                            if (aborted) {
+                                return;
+                            }
+                            int len = Math.min(SLICE, wav.length - off);
+                            float[] slice = new float[len];
+                            System.arraycopy(wav, off, slice, 0, len);
+                            Integer r = cb.invoke(slice);
+                            if (r == null || r == 0) {
+                                return;
+                            }
+                            off += len;
+                        }
+                    } finally {
+                        closeQuietly(decRes);
+                        decRes = null;
+                        closeTensors(decInputs);
+                    }
+                } finally {
+                    closeQuietly(durRes);
+                    durRes = null;
+                    closeTensors(durInputs);
+                }
+            }
+        } finally {
+            closeTensors(durInputs);
+            closeTensors(decInputs);
+        }
+    }
+
+    private static void closeTensors(Map<String, OnnxTensor> inputs) {
+        for (OnnxTensor t : inputs.values()) {
+            closeQuietly(t);
+        }
+        inputs.clear();
+    }
+
+    private static int writeZeros(SynthCallback cb, int len) {
+        if (len <= 0) {
+            return len;
+        }
+        float[] zeros = new float[Math.min(len, SAMPLE_RATE / 5)];
+        int left = len;
+        while (left > 0) {
+            int n = Math.min(left, zeros.length);
+            float[] slice = n == zeros.length ? zeros : java.util.Arrays.copyOf(zeros, n);
+            Integer r = cb.invoke(slice);
+            if (r == null || r == 0) {
+                return 0;
+            }
+            left -= n;
+        }
+        return len;
+    }
+
+    private static float[] flat(OnnxTensor t) {
+        try {
+            FloatBuffer fb = t.getFloatBuffer();
+            float[] out = new float[fb.remaining()];
+            fb.get(out);
+            return out;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    /** 5 ms linear fade at both ends (the reference runner's edge_fade) */
+    private static void edgeFade(float[] wav, int sampleRate, int ms) {
+        int frames = Math.min(Math.round(sampleRate * ms / 1000f), wav.length / 2);
+        if (frames <= 0) {
+            return;
+        }
+        for (int i = 0; i < frames; i++) {
+            float g = (float) i / frames;
+            wav[i] *= g;
+            wav[wav.length - 1 - i] *= g;
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable c) {
+        if (c != null) {
+            try {
+                c.close();
+            } catch (Throwable e) {
+            }
+        }
     }
 
     /**
      * Diagnostics: synchronous generation outside the reading queue.
      */
-    public GeneratedAudio generateForDiag(String text, int sid, float speed) throws Throwable {
-        OfflineTts t = tts;
-        if (t == null) {
-            throw new IllegalStateException("Kokoro engine is not ready");
+    public TtsAudio generateForDiag(String text, int sid, float speed) throws Throwable {
+        OrtSession dur = durSession;
+        if (dur == null) {
+            throw new IllegalStateException("Inflect engine is not ready");
         }
-        return t.generate(text, sid, speed);
+        final java.util.List<float[]> parts = new java.util.ArrayList<float[]>();
+        final int[] total = new int[1];
+        generateStream(text, speed, new SynthCallback() {
+            public Integer invoke(float[] samples) {
+                parts.add(samples);
+                total[0] += samples.length;
+                return 1;
+            }
+        });
+        float[] all = new float[total[0]];
+        int off = 0;
+        for (float[] p : parts) {
+            System.arraycopy(p, 0, all, off, p.length);
+            off += p.length;
+        }
+        return new TtsAudio(all, SAMPLE_RATE);
     }
 
     /**
@@ -920,13 +1124,13 @@ public class KokoroEngine {
      * reader uses and reports how far the hardware consumed it.
      */
     public String playForDiag(final float[] samples) {
-        OfflineTts t = tts;
-        if (t == null || samples == null || samples.length == 0) {
+        OrtSession dur = durSession;
+        if (dur == null || samples == null || samples.length == 0) {
             return "playback: no data to play";
         }
         AudioTrack at = null;
         try {
-            at = buildTrack(t.getSampleRate());
+            at = buildTrack(SAMPLE_RATE);
             at.play();
             final int written = at.write(samples, 0, samples.length, AudioTrack.WRITE_BLOCKING);
             long start = android.os.SystemClock.elapsedRealtime();
@@ -985,7 +1189,7 @@ public class KokoroEngine {
 
     private File extractModel() throws Exception {
         Context c = LibreraApp.context;
-        File outDir = new File(c.getFilesDir(), "kokoro");
+        File outDir = new File(c.getFilesDir(), "inflect");
         File marker = new File(outDir, ".version");
         if (marker.exists()) {
             String v = readText(marker).trim();
@@ -995,7 +1199,7 @@ public class KokoroEngine {
         }
         deleteRecursive(outDir);
         outDir.mkdirs();
-        copyAssets(c, "kokoro", outDir);
+        copyAssets(c, "inflect", outDir);
         writeText(marker, MODEL_VERSION);
         LOG.d(TAG, "model extracted to", outDir.getAbsolutePath());
         return outDir;

@@ -128,7 +128,7 @@ grep -m 5 "Kokoro\|TTSService\|keep-alive" logcat-tts.txt || true
 # the engine logs "model extracted to" on first unpack; run-as stays as a
 # fallback channel for debug builds.
 if grep -q "model extracted to" logcat-tts.txt \
-   || adb shell run-as com.foobnix.pdf.reader.ai test -f files/kokoro/model.int8.onnx; then
+   || adb shell run-as com.foobnix.pdf.reader.ai test -f files/inflect/duration.onnx; then
   echo "KOKORO MODEL EXTRACTED - offline AI engine path was used"
 else
   echo "::error::KOKORO ENGINE NOT USED - model was never unpacked"

@@ -1,18 +1,17 @@
 package com.foobnix.ai;
 
 /**
- * Built-in voices of the shipped Kokoro-7M-Distill model
- * (oddadmix/Kokoro-7M-Distill via the sherpa-onnx bundle). The distilled 7M
- * student ships a single speaker: af_msa (sid 0). Keep the table-driven API
- * so the UI code stays unchanged.
+ * Voice table of the shipped Inflect-Nano-v2 model (single male en-US
+ * speaker; the checkpoint has n_speakers=0). The table-driven API is kept
+ * from the Kokoro days so the reader/services/UI stay unchanged.
  */
 public class KokoroVoices {
     public static final String[] CODES = {
-            "af_msa"
+            "inflect_nano_v2"
     };
 
     public static final String[] DISPLAY = {
-            "MSA (en-US Female)"
+            "Inflect Nano v2 (en-US Male)"
     };
 
     public static int sidOf(String code) {

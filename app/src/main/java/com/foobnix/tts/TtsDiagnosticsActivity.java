@@ -29,7 +29,7 @@ import com.foobnix.android.utils.LOG;
 import com.foobnix.model.AppState;
 import com.foobnix.pdf.info.AppsConfig;
 import com.foobnix.pdf.info.R;
-import com.k2fsa.sherpa.onnx.GeneratedAudio;
+import com.foobnix.ai.TtsAudio;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -181,15 +181,15 @@ public class TtsDiagnosticsActivity extends Activity {
 
         // ------------------------------------------------ 2. model files
         appendLine("");
-        appendLine("[2/6] KOKORO MODEL FILES");
-        File dir = new File(getFilesDir(), "kokoro");
+        appendLine("[2/6] AI TTS MODEL FILES");
+        File dir = new File(getFilesDir(), "inflect");
         if (!dir.exists()) {
             appendLine("model dir MISSING (extracted on the first Play - that is OK)");
         } else {
             appendLine("model dir: " + dir);
-            appendLine("model.int8.onnx: " + fileLen(new File(dir, "model.int8.onnx")));
-            appendLine("voices.bin: " + fileLen(new File(dir, "voices.bin")));
-            appendLine("tokens.txt: " + fileLen(new File(dir, "tokens.txt")));
+            appendLine("duration.onnx: " + fileLen(new File(dir, "duration.onnx")));
+            appendLine("decode.onnx: " + fileLen(new File(dir, "decode.onnx")));
+            appendLine("lexicon-en.txt: " + fileLen(new File(dir, "lexicon-en.txt")));
             appendLine("espeak-ng-data entries: " + countFiles(new File(dir, "espeak-ng-data")));
             appendLine("dict entries: " + countFiles(new File(dir, "dict")));
         }
@@ -211,12 +211,12 @@ public class TtsDiagnosticsActivity extends Activity {
         // ------------------------------------------------ 4. synthesis
         if (KokoroEngine.get().isReady()) {
             appendLine("");
-            appendLine("[4/6] KOKORO SYNTHESIS TEST");
+            appendLine("[4/6] AI SYNTHESIS TEST");
             try {
                 int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
-                String text = "Проверка звука. Раз, два, три. Если вы слышите голос, всё работает.";
+                String text = "Sound check. One, two, three. If you can hear this voice, everything works.";
                 long t1 = android.os.SystemClock.elapsedRealtime();
-                GeneratedAudio audio = KokoroEngine.get().generateForDiag(text, sid, 1.0f);
+                TtsAudio audio = KokoroEngine.get().generateForDiag(text, sid, 1.0f);
                 long ms = android.os.SystemClock.elapsedRealtime() - t1;
                 float[] s = audio.getSamples();
                 float peak = 0;
@@ -247,8 +247,8 @@ public class TtsDiagnosticsActivity extends Activity {
             appendLine("[5/6] AUDIO PLAYBACK TEST - the phrase should SOUND now");
             try {
                 int sid = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
-                GeneratedAudio audio = KokoroEngine.get()
-                        .generateForDiag("Проверка воспроизведения. Один, два, три.", sid, 1.0f);
+                TtsAudio audio = KokoroEngine.get()
+                        .generateForDiag("Playback check. One, two, three.", sid, 1.0f);
                 String res = KokoroEngine.get().playForDiag(audio.getSamples());
                 appendLine(res);
                 appendLine("Did you HEAR the phrase just now? (yes = audio stack OK)");

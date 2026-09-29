@@ -735,7 +735,7 @@
     <string name="tts_word_highlight_on">Подсветка текущего слова: ВКЛ</string>
     <string name="tts_word_highlight_off">Подсветка текущего слова: ВЫКЛ</string>
     <string name="tts_engine_title">Голосовой движок</string>
-    <string name="tts_engine_kokoro">Kokoro TTS (встроенный ИИ)</string>
+    <string name="tts_engine_kokoro">Inflect Nano TTS (встроенный ИИ)</string>
     <string name="tts_engine_system">%s (системный)</string>
     <string name="tts_engine_google_local">Google TTS (локальный)</string>
     <string name="tts_installed">установлен</string>
