@@ -105,13 +105,15 @@ public class LibreraApp extends Application {
         try {
             // Warm up the offline AI voice in the background so that pressing
             // Play starts speaking immediately instead of waiting seconds for
-            // the Kokoro model to initialize on the first playback.
-            // The ONNX runtime keeps the model (~250 MB) resident for the whole
-            // session, so an eager warm-up at startup means GC pressure on every
-            // UI interaction - buttons lag even when TTS is never opened. Warm up
-            // only after the UI has settled, and skip it entirely on low-RAM
-            // devices (there the lazy path in TTSEngine prepares the engine on
-            // the first Play press).
+            // the model to initialize on the first playback. The engine holds
+            // ~135 MB resident (transient peaks to ~200 MB while decoding a
+            // chunk), so an eager warm-up at startup adds GC pressure on every
+            // UI interaction - buttons lag even when TTS is never opened. Warm
+            // up only after the UI has settled, skip low-RAM devices and let
+            // the memory guard inside KokoroEngine.prepareAsync refuse to load
+            // when the device is already tight (there the lazy path in
+            // TTSEngine falls back to the system voice instead of being
+            // LMK-killed with the whole reader).
             final android.app.ActivityManager am =
                     (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
             boolean lowRamDevice = false;
@@ -295,6 +297,22 @@ public class LibreraApp extends Application {
         LOG.d("onTrimMemory", level);
         IMG.clearMemoryCache();
         TempHolder.get().loadingCancelled.set(true);
+        // give the AI-engine memory back BEFORE the system starts killing:
+        // the idle engine holds ~135 MB resident and with a memory-heavy PDF
+        // open that used to push the reader over the LMK line ("kicked to the
+        // main page" bug). Released only while nothing is playing; the next
+        // Play press re-initializes the engine in a couple of seconds.
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            try {
+                com.foobnix.ai.KokoroEngine k = com.foobnix.ai.KokoroEngine.get();
+                if (k.isReady() && !k.isBusy()) {
+                    k.release();
+                    android.util.Log.i("KokoroDiag", "engine released on trim level " + level);
+                }
+            } catch (Throwable t) {
+                LOG.e(t);
+            }
+        }
     }
 
     @Override

@@ -238,7 +238,11 @@ public final class InflectFrontend {
 
     // ------------------------------------------------------------------ chunking
 
-    private static final int CHUNK_LIMIT = 280;
+    /** decode peak RAM scales ~linearly with the chunk length (measured on the
+     *  real graphs: +156 MB transient for 280 chars vs +85 MB for 140); 140
+     *  keeps the engine small enough to coexist with an open PDF - bigger
+     *  chunks were pushing the process over the LMK line mid-play */
+    private static final int CHUNK_LIMIT = 140;
 
     /** sentence split with the reference runner's length cap and pause rules */
     public static List<String> splitSentences(String text) {

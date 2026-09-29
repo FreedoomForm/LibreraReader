@@ -109,6 +109,12 @@ public class KokoroEngine {
     /** consecutive zero-sample generations - 3 in a row trip the system-TTS fallback */
     private final java.util.concurrent.atomic.AtomicInteger zeroStreak =
             new java.util.concurrent.atomic.AtomicInteger(0);
+    /** refuse to prepare below this free RAM: the engine needs ~135 MB steady
+     *  (~200 MB transient peak) and preparing it on a device that is already
+     *  tight - e.g. with a memory-heavy PDF open - got the whole process
+     *  LMK-killed (the "kicked back to the main page" bug). Falling back to
+     *  the system voice politely is always better than dying mid-read. */
+    private static final long MIN_PREPARE_AVAIL_MEM = 220L * 1024 * 1024;
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     /** fires the per-word highlight events of sentence clips from the playhead */
@@ -159,6 +165,28 @@ public class KokoroEngine {
             public void run() {
                 try {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                    // do not fight the system for memory: preparing the engine on
+                    // a device that is already tight (PDF bitmaps, big caches)
+                    // used to get the whole process LMK-killed. Refuse politely
+                    // instead - the reader falls back to the system voice.
+                    try {
+                        android.app.ActivityManager am = (android.app.ActivityManager) LibreraApp.context
+                                .getSystemService(Context.ACTIVITY_SERVICE);
+                        if (am != null) {
+                            android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                            am.getMemoryInfo(mi);
+                            if (mi.lowMemory || mi.availMem < MIN_PREPARE_AVAIL_MEM) {
+                                android.util.Log.i(DIAG_TAG, "kokoro init SKIPPED: low memory, avail="
+                                        + (mi.availMem >> 20) + " MB");
+                                ready = false;
+                                toastSafe("AI voice needs more free memory - using the system voice");
+                                TTSEngine.get().onKokoroFailure();
+                                return;
+                            }
+                        }
+                    } catch (Throwable memErr) {
+                        LOG.d(TAG, "memory check failed:", memErr);
+                    }
                     long initStart = android.os.SystemClock.elapsedRealtime();
                     prepareInternal();
                     android.util.Log.i(DIAG_TAG, "kokoro init OK in "
@@ -220,22 +248,21 @@ public class KokoroEngine {
             ortEnv = OrtEnvironment.getEnvironment();
             OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
             try {
-                // synthesis is the heavy part; every ORT thread carries its own
-                // memory arena, so on a phone that also renders PDF pages the
-                // thread count (and peak RAM) is kept low: 2-3 threads keep RTF
-                // well under 1 for this 16 MB model and leave RAM for the reader
-                int cores = Runtime.getRuntime().availableProcessors();
-                int onnxThreads = Math.max(2, Math.min(3, cores - 1));
-                opts.setIntraOpNumThreads(onnxThreads);
-                // fewer preallocated execution plans, smaller arena growth:
-                // lower peak memory at a negligible speed cost for this model
+                // MEMORY IS THE #1 KILLER HERE, not speed: measured on the real
+                // graphs, one decode pass of a 280-char chunk spiked +156 MB and
+                // the BFC arena kept it resident for the whole session - with a
+                // PDF open that pushed the process over the LMK line and Android
+                // silently restarted it ("kicked to the main page" bug). Levers:
+                // (a) ONE intra-op thread - measured FASTER than 2-3 threads for
+                //     this small model (thread-pool overhead dominates) with the
+                //     smallest workspace, RTF ~0.13 on a weak sandbox core;
+                // (b) NO arena allocator - ORT returns scratch memory to the OS
+                //     after every chunk instead of hoarding it for reuse:
+                //     steady footprint drops from ~268 MB to ~135 MB.
+                opts.setIntraOpNumThreads(1);
                 opts.setMemoryPatternOptimization(false);
-                try {
-                    opts.addConfigEntry("session.memory.arena_extend_strategy", "kSameAsRequested");
-                } catch (Throwable t) {
-                    LOG.d(TAG, "arena config rejected:", t);
-                }
-                LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
+                opts.setCPUArenaAllocator(false);
+                LOG.d(TAG, "prepare: 1 intra-op thread, arena off");
             } catch (Throwable t) {
                 LOG.e(t);
             }

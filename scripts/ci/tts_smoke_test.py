@@ -13,7 +13,10 @@ import onnxruntime as ort
 
 model_dir, out_path = sys.argv[1], sys.argv[2]
 
-TEXT = "Hello from the offline voice engine. This is a real synthesis test."
+TEXT = ("Hello from the offline voice engine. This is a real synthesis test. "
+        "The reader must survive a long paragraph with several sentences, "
+        "because decode memory grows with the length of the text. If this "
+        "paragraph sounds fine, a whole page of a book will sound fine too.")
 
 # ---- symbols (must match InflectFrontend.SYMBOLS / runtime/text/symbols.py)
 import re
