@@ -30,9 +30,12 @@ import ai.onnxruntime.OrtSession;
  * <p>
  * The whole utterance is processed in one pass (DFN3 is stateless between
  * calls, GRU zero-initialized per utterance - exactly like the reference).
- * On already-clean TTS audio the model behaves close to identity with a
- * mild polish; on slow devices the caller auto-disables it (see
- * {@link #getMeasuredSpeedFactor()}).
+ * The audible "polish" chain ({@link VoicePolish}: loudness, clarity,
+ * limiter) always runs after the model stage - on already-clean TTS audio
+ * the denoiser alone is close to transparent, the polish is what the user
+ * actually hears (user feedback on build 7352). On slow devices only the
+ * DFN3 stage is auto-disabled (see {@link #getMeasuredSpeedFactor()}), the
+ * polish is cheap enough for any device.
  */
 public class VoiceEnhancer {
     public static final String MODEL_VERSION = "dfn3-official-v1";
@@ -54,6 +57,8 @@ public class VoiceEnhancer {
     private volatile OrtEnvironment env;
     private volatile boolean preparing = false;
     private volatile boolean available = false;
+    /** set when the device proved too slow for the DFN3 stage; polish keeps running */
+    private volatile boolean dfn3Disabled = false;
     /** measured: seconds of audio produced per second of compute (>=1 is realtime) */
     private volatile double measuredSpeedFactor = 0;
 
@@ -63,6 +68,15 @@ public class VoiceEnhancer {
 
     public double getMeasuredSpeedFactor() {
         return measuredSpeedFactor;
+    }
+
+    /** disables only the DFN3 stage (slow device); the polish chain stays on */
+    public void setDfn3Disabled(boolean disabled) {
+        dfn3Disabled = disabled;
+    }
+
+    public boolean isDfn3Disabled() {
+        return dfn3Disabled;
     }
 
     public void prepareAsync() {
@@ -158,14 +172,32 @@ public class VoiceEnhancer {
 
     /**
      * Enhances 16-bit mono PCM at the given sample rate. Returns new PCM at
-     * the same rate, same length. If the model is not available the input is
-     * returned unchanged.
+     * the same rate, same length. The DFN3 model stage runs when the models
+     * are ready; the {@link VoicePolish} chain always runs - so the caller
+     * gets audibly processed audio even when the model is unavailable.
      */
     public short[] enhance(short[] pcm, int sampleRate) {
-        OrtSession enc = encSession;
-        if (enc == null || !available || pcm == null || sampleRate <= 0) {
+        if (pcm == null || pcm.length == 0 || sampleRate <= 0) {
             return pcm;
         }
+        short[] x = pcm;
+        OrtSession enc = encSession;
+        if (enc != null && available && !dfn3Disabled) {
+            try {
+                x = runDfn3(pcm, sampleRate, enc);
+            } catch (Throwable e) {
+                LOG.e(e);
+                x = pcm; // fail open: unenhanced audio beats silence
+            }
+        }
+        return VoicePolish.apply(x, sampleRate);
+    }
+
+    /**
+     * DFN3 model stage only. Returns the input unchanged on any guard
+     * violation or failure (fail open).
+     */
+    private short[] runDfn3(short[] pcm, int sampleRate, OrtSession enc) {
         float[] src = new float[pcm.length];
         for (int i = 0; i < pcm.length; i++) {
             src[i] = pcm[i] / 32768f;

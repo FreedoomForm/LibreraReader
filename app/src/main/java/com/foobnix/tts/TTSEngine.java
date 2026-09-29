@@ -589,15 +589,15 @@ public class TTSEngine {
     }
 
     /**
-     * true when the user asked for the DFN3 enhanced system voice and the
-     * model is ready (or still warming up and likely to be ready in time)
+     * true when the user asked for the enhanced voice (DeepFilterNet3
+     * + loudness polish). The enhancement targets the SYSTEM voice output:
+     * when Kokoro is enabled it handles English text itself (early return
+     * above), so what reaches this point with Kokoro on is exactly the
+     * system-voice fallback (non-English books, engine failure) - and that
+     * is what gets enhanced.
      */
     private boolean useEnhancePath() {
-        if (!AppState.get().ttsVoiceEnhance || AppState.get().ttsUseKokoro) {
-            return false;
-        }
-        return com.foobnix.ai.VoiceEnhancer.get().isAvailable()
-                || com.foobnix.ai.ReuseVoicePlayer.get().isActive();
+        return AppState.get().ttsVoiceEnhance;
     }
 
     /**
@@ -680,10 +680,11 @@ public class TTSEngine {
             android.util.Log.i("KokoroDiag", "kokoro skip: non-English text, using system TTS");
         }
         if (useEnhancePath()) {
-            // RE-USE enhanced system voice: paragraphs go through
-            // synthesizeToFile -> ONNX filter -> AudioTrack. The playback
-            // completion re-fires the same utterance callbacks, so the
-            // service protocol (bookmarks, page turns, stop) is unchanged.
+            // Enhanced system voice: paragraphs go through
+            // synthesizeToFile -> DeepFilterNet3 + loudness polish ->
+            // AudioTrack. The playback completion re-fires the same utterance
+            // callbacks, so the service protocol (bookmarks, page turns,
+            // stop) is unchanged.
             if (com.foobnix.ai.ReuseVoicePlayer.get().activate() && speakEnhancedLocked(text)) {
                 return;
             }

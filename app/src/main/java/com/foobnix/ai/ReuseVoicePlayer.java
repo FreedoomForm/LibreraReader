@@ -37,8 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * utterance callbacks (fireKokoroDone / downstream listener) that the plain
  * system-TTS path fires at synthesis completion, so paragraph bookmarks,
  * page turns, stop signals and the sleep timer all behave identically.
- * If the device is too slow for the model, the filter turns itself off and
- * reading continues with the unenhanced voice - playback never stalls.
+ * If the device is too slow for the model, the DFN3 stage turns itself off
+ * and reading continues with the loudness-polished voice - playback never
+ * stalls.
  */
 public class ReuseVoicePlayer {
     private static final String TAG = "ReuseVoicePlayer";
@@ -303,8 +304,10 @@ public class ReuseVoicePlayer {
         }
         it.sampleRate = lastRate;
         boolean enhanced = false;
-        if (AppState.get().ttsVoiceEnhance && !slowDeviceDisabled
-                && VoiceEnhancer.get().isAvailable()) {
+        if (AppState.get().ttsVoiceEnhance) {
+            // VoiceEnhancer always applies the audible polish chain; the DFN3
+            // model stage runs on top when its models are loaded and it was
+            // not auto-disabled on a slow device.
             short[] before = pcm;
             long t0 = android.os.SystemClock.elapsedRealtime();
             short[] after = VoiceEnhancer.get().enhance(pcm, it.sampleRate);
@@ -312,22 +315,27 @@ public class ReuseVoicePlayer {
             if (after != null && after != before && after.length > 0) {
                 pcm = after;
                 enhanced = true;
-                double audioSec = (double) after.length / it.sampleRate;
-                double factor = audioSec / Math.max(0.001, dt / 1000.0);
-                if (factor < MIN_SPEED_FACTOR) {
-                    if (++slowStreak >= 2) {
-                        slowDeviceDisabled = true;
-                        android.util.Log.i(KokoroEngine.DIAG_TAG,
-                                "DFN3 disabled: device too slow (factor " + factor + ")");
-                        toastSlow();
+                if (!VoiceEnhancer.get().isDfn3Disabled()) {
+                    double audioSec = (double) after.length / it.sampleRate;
+                    double factor = audioSec / Math.max(0.001, dt / 1000.0);
+                    if (factor < MIN_SPEED_FACTOR) {
+                        if (++slowStreak >= 2) {
+                            VoiceEnhancer.get().setDfn3Disabled(true);
+                            slowDeviceDisabled = true;
+                            android.util.Log.i(KokoroEngine.DIAG_TAG,
+                                    "DFN3 disabled: device too slow (factor " + factor
+                                    + "); polish continues");
+                            toastSlow();
+                        }
+                    } else {
+                        slowStreak = 0;
                     }
-                } else {
-                    slowStreak = 0;
                 }
             }
         }
         android.util.Log.i(KokoroEngine.DIAG_TAG, "dfn3 utterance: samples=" + pcm.length
-                + " rate=" + it.sampleRate + " enhanced=" + enhanced);
+                + " rate=" + it.sampleRate + " enhanced=" + enhanced
+                + " dfn3=" + !VoiceEnhancer.get().isDfn3Disabled());
 
         // ---- 3. play through AudioTrack ----
         fireStart(it.utteranceId);
