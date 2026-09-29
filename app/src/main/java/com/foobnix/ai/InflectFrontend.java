@@ -31,7 +31,7 @@ public final class InflectFrontend {
 
     /** keithito symbol table, exact order of runtime/text/symbols.py */
     public static final String SYMBOLS =
-            + "_;:,.!?\u00a1\u00bf\u2014\u2026\"\u00ab\u00bb\u201c\u201d ABCDEFGHIJKL"
+            "_;:,.!?\u00a1\u00bf\u2014\u2026\"\u00ab\u00bb\u201c\u201d ABCDEFGHIJKL"
             + "MNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\u0251\u0250\u0252\u00e6\u0253"
             + "\u0299\u03b2\u0254\u0255\u00e7\u0257\u0256\u00f0\u02a4\u0259\u0258"
             + "\u025a\u025b\u025c\u025d\u025e\u025f\u0284\u0261\u0260\u0262\u029b"
