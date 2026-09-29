@@ -24,11 +24,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Real-time RE-USE voice enhancement pipeline for the SYSTEM TTS engine.
+ * Real-time DeepFilterNet3 voice enhancement pipeline for the SYSTEM TTS engine.
  * <p>
  * Instead of letting the engine play the synthesized audio directly, each
  * page paragraph is synthesized to a WAV file (synthesizeToFile), filtered
- * through {@link VoiceEnhancer} (NVIDIA RE-USE, ONNX int8) and played back
+ * through {@link VoiceEnhancer} (DeepFilterNet3, ONNX) and played back
  * through an AudioTrack. Word-highlight ranges reported during synthesis
  * (onRangeStart) are re-fired at the exact playback position, so the
  * highlight stays glued to the enhanced audio.
@@ -266,7 +266,7 @@ public class ReuseVoicePlayer {
 
         // ---- 1. synthesize to file ----
         File wav = new File(LibreraApp.context.getCacheDir(),
-                "tts_reuse_" + System.nanoTime() + ".wav");
+                "tts_enh_" + System.nanoTime() + ".wav");
         it.synthLatch = new CountDownLatch(1);
         current.set(it);
         Bundle params = new Bundle();
@@ -318,7 +318,7 @@ public class ReuseVoicePlayer {
                     if (++slowStreak >= 2) {
                         slowDeviceDisabled = true;
                         android.util.Log.i(KokoroEngine.DIAG_TAG,
-                                "RE-USE disabled: device too slow (factor " + factor + ")");
+                                "DFN3 disabled: device too slow (factor " + factor + ")");
                         toastSlow();
                     }
                 } else {
@@ -326,7 +326,7 @@ public class ReuseVoicePlayer {
                 }
             }
         }
-        android.util.Log.i(KokoroEngine.DIAG_TAG, "reuse utterance: samples=" + pcm.length
+        android.util.Log.i(KokoroEngine.DIAG_TAG, "dfn3 utterance: samples=" + pcm.length
                 + " rate=" + it.sampleRate + " enhanced=" + enhanced);
 
         // ---- 3. play through AudioTrack ----

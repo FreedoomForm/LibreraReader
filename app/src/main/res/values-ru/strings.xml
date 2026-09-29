@@ -713,11 +713,11 @@
     <string name="tts_word_mode_on">Пословное чтение в реальном времени: ВКЛ</string>
     <string name="tts_word_mode_off">Пословное чтение в реальном времени: ВЫКЛ</string>
     <string name="tts_voice_default">\u0413\u043e\u043b\u043e\u0441 \u0434\u0432\u0438\u0436\u043a\u0430 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e</string>
-    <string name="tts_voice_enhance_title">Улучшение голоса (RE-USE)</string>
-    <string name="tts_voice_enhance_on">Улучшение голоса (RE-USE): ВКЛ</string>
-    <string name="tts_voice_enhance_off">Улучшение голоса (RE-USE): ВЫКЛ</string>
-    <string name="tts_voice_enhance_slow">Улучшение голоса отключено: устройство слишком медленное для модели RE-USE. Чтение продолжится обычным голосом.</string>
-    <string name="tts_voice_enhance_ready">Улучшение голоса RE-USE активно</string>
+    <string name="tts_voice_enhance_title">Улучшение голоса (DeepFilterNet3)</string>
+    <string name="tts_voice_enhance_on">Улучшение голоса (DeepFilterNet3): ВКЛ</string>
+    <string name="tts_voice_enhance_off">Улучшение голоса (DeepFilterNet3): ВЫКЛ</string>
+    <string name="tts_voice_enhance_slow">Улучшение голоса отключено: устройство слишком медленное для модели DeepFilterNet3. Чтение продолжится обычным голосом.</string>
+    <string name="tts_voice_enhance_ready">Улучшение голоса DeepFilterNet3 активно</string>
     <string name="tts_add_voice">\u002b \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0433\u043e\u043b\u043e\u0441</string>
     <string name="tts_record_voice">\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c \u0433\u043e\u043b\u043e\u0441</string>
     <string name="tts_choose_voice_file">\u0412\u044b\u0431\u0440\u0430\u0442\u044c \u0430\u0443\u0434\u0438\u043e\u0444\u0430\u0439\u043b (MP3)</string>

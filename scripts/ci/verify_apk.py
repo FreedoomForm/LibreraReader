@@ -17,10 +17,12 @@ need(lambda x: x == 'assets/kokoro/voices.bin', 'voices.bin present')
 need(lambda x: x == 'assets/kokoro/tokens.txt', 'tokens.txt present')
 need(lambda x: x == 'assets/kokoro/lexicon-us-en.txt', 'misaki-derived lexicon (us-en)')
 need(lambda x: x.startswith('assets/kokoro/espeak-ng-data/'), 'espeak-ng-data files', 300)
-if any(x == 'assets/reuse/model.int8.onnx' for x in names):
-    print('OK: RE-USE enhancement model bundled')
+dfn3 = {'assets/dfn3/enc.onnx', 'assets/dfn3/erb_dec.onnx', 'assets/dfn3/df_dec.onnx'}
+if dfn3 <= set(names):
+    print('OK: DeepFilterNet3 enhancement models bundled (%.1f MB total)' % (
+        sum(z.getinfo(x).file_size for x in dfn3) / 1048576.0))
 else:
-    print('WARN: RE-USE enhancement model NOT bundled (export step failed?) - enhancement toggle will report unavailable')
+    raise AssertionError('FAIL: DeepFilterNet3 models missing from assets/dfn3/ - enhancement toggle will be unavailable')
 need(lambda x: x.startswith('lib/arm64-v8a/'), 'arm64-v8a native libs', 2)
 
 so = [x for x in names if x.endswith('libsherpa-onnx-jni.so') and 'arm64' in x]

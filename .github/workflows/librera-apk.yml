@@ -92,7 +92,7 @@ jobs:
           }
           GSJ
 
-      - name: Bundle Kokoro-7M-Distill + RE-USE models
+      - name: Bundle Kokoro-7M-Distill models
         run: |
           set -e
           python3 - <<'PYEOF'
@@ -138,12 +138,12 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/kokoro
 
-      # NOTE: the NVIDIA RE-USE ONNX export is intentionally not run in CI
-      # yet: torch's exporter unrolls constant-trip Mamba loops and needs
-      # >60GB RAM for the 30-block SEMamba (see scripts/reuse/export_onnx.py).
-      # The VoiceEnhancer in the app handles the missing model gracefully -
-      # the "Enhance voice (RE-USE)" toggle reports unavailable and reads
-      # unenhanced until the Loop-preserving export lands.
+      # NOTE: DeepFilterNet3 (official 48kHz checkpoint, enc/erb_dec/df_dec
+      # split export) replaces the old RE-USE plan: RE-USE's Mamba scan needs
+      # RTF~65 on CPU - unusable on phones. DFN3 weights are committed under
+      # app/src/main/assets/dfn3/ and verified by scripts/ci/verify_apk.py.
+      # The Java DSP (Dfn3Dsp) was validated bit-accurate against the
+      # reference implementation (SNR 71.5 dB).
 
       - name: Build native sherpa-onnx JNI libs (lexicon-first patch, static)
         run: |

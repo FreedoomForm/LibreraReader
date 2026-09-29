@@ -946,7 +946,7 @@ public class DragingDialogs {
                     }
                 });
 
-                // ---- RE-USE voice enhancement of the system TTS output ----
+                // ---- DeepFilterNet3 voice enhancement of the system TTS output ----
                 final androidx.appcompat.widget.SwitchCompat ttsVoiceEnhanceSwitch = view
                         .findViewById(R.id.ttsVoiceEnhanceSwitch);
                 ttsVoiceEnhanceSwitch.setChecked(AppState.get().ttsVoiceEnhance);

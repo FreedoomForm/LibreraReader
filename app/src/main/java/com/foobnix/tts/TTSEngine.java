@@ -293,7 +293,7 @@ public class TTSEngine {
         LOG.d(TAG, "stop");
         kokoroPlaySeq.incrementAndGet();
         ttsRangeIndex.clear();
-        // RE-USE enhanced playback: release the AudioTrack, flush the queue and
+        // DFN3 enhanced playback: release the AudioTrack, flush the queue and
         // restore the engine's progress listener (no-op when not active)
         try {
             com.foobnix.ai.ReuseVoicePlayer.get().stop();
@@ -376,7 +376,7 @@ public class TTSEngine {
         }
     }
 
-    /** the service's utterance listener (used by the RE-USE player as downstream) */
+    /** the service's utterance listener (used by the DFN3 player as downstream) */
     public UtteranceProgressListener getKokoroProgressListener() {
         return kokoroProgressListener;
     }
@@ -589,7 +589,7 @@ public class TTSEngine {
     }
 
     /**
-     * true when the user asked for the RE-USE enhanced system voice and the
+     * true when the user asked for the DFN3 enhanced system voice and the
      * model is ready (or still warming up and likely to be ready in time)
      */
     private boolean useEnhancePath() {
@@ -601,7 +601,7 @@ public class TTSEngine {
     }
 
     /**
-     * Queues the page paragraphs into the RE-USE player instead of the TTS
+     * Queues the page paragraphs into the DFN3 player instead of the TTS
      * playback queue. Returns false when the system engine is unavailable
      * (the caller falls back to the plain speak path).
      */
