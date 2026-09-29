@@ -145,9 +145,77 @@ public class TtsDiagnosticsActivity extends Activity {
         }, "tts-diag").start();
     }
 
+    private static String exitReasonName(int reason) {
+        switch (reason) {
+            case android.app.ApplicationExitInfo.REASON_LOW_MEMORY:
+                return "LOW_MEMORY - the system killed the app for RAM (LMK)";
+            case android.app.ApplicationExitInfo.REASON_CRASH:
+                return "CRASH - uncaught java exception (see the recorded log below)";
+            case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE:
+                return "CRASH_NATIVE - native code died (abort signal in status)";
+            case android.app.ApplicationExitInfo.REASON_ANR:
+                return "ANR - the main thread was frozen and the user/system closed the app";
+            case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE:
+                return "EXCESSIVE_RESOURCE_USAGE";
+            case android.app.ApplicationExitInfo.REASON_USER_REQUESTED:
+                return "USER_REQUESTED";
+            case android.app.ApplicationExitInfo.REASON_SIGNALED:
+                return "SIGNALED (killed by an external signal)";
+            default:
+                return "REASON_" + reason;
+        }
+    }
+
     private void runAll() {
         appendLine("==== Librera TTS diagnostics ====");
         appendLine("time: " + new java.util.Date());
+
+        // ------------------------------------------------ 0. why did the process die last time
+        // "Kicked to the main page" = the OS killed or restarted the process.
+        // ApplicationExitInfo (Android 11+) records the EXACT death reason of
+        // the previous run - LOW_MEMORY vs CRASH(signal) vs ANR - which turns
+        // every future user report into a precise diagnosis.
+        appendLine("");
+        appendLine("[0/6] LAST PROCESS EXITS (evidence of \"kicked to the main page\")");
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                java.util.List<android.app.ApplicationExitInfo> exits = am
+                        .getHistoricalProcessExitReasons(getPackageName(), 0, 6);
+                if (exits.isEmpty()) {
+                    appendLine("no exit records yet");
+                }
+                for (android.app.ApplicationExitInfo e : exits) {
+                    appendLine("- " + new java.util.Date(e.getTimestamp())
+                            + " | " + exitReasonName(e.getReason())
+                            + " | status=" + e.getStatus()
+                            + ((e.getDescription() == null || e.getDescription().isEmpty())
+                               ? "" : " | " + e.getDescription()));
+                }
+            } else {
+                appendLine("exit history needs Android 11+ (this device: SDK " + Build.VERSION.SDK_INT + ")");
+            }
+        } catch (Throwable e) {
+            appendLine("exit history FAILED: " + e);
+        }
+        File crashLog = new File(getExternalFilesDir(null), "tts_crash.log");
+        if (crashLog.exists()) {
+            appendLine("---- recorded uncaught exceptions (" + crashLog.getName() + ") ----");
+            try {
+                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(crashLog));
+                String ln;
+                int shown = 0;
+                while ((ln = r.readLine()) != null && shown < 40) {
+                    appendLine(ln);
+                    shown++;
+                }
+                r.close();
+            } catch (Throwable e) {
+                appendLine("crash log read FAILED: " + e);
+            }
+        } else {
+            appendLine("no uncaught java exceptions recorded");
+        }
 
         // ------------------------------------------------ 1. device
         appendLine("");

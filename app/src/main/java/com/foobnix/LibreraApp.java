@@ -85,6 +85,33 @@ public class LibreraApp extends Application {
         Prefs.get().init(this);
 
         try {
+            // Crash breadcrumbs: record every uncaught exception (any thread)
+            // to a small file that SURVIVES the process death. "Kicked to the
+            // main page" reports are undiagnosable without evidence - the
+            // TTS diagnostics screen shows this file next to the OS exit
+            // history (ApplicationExitInfo), covering java crashes, native
+            // crashes, ANR and low-memory kills alike.
+            final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                @Override public void uncaughtException(Thread t, Throwable e) {
+                    try {
+                        java.io.File f = new java.io.File(getExternalFilesDir(null), "tts_crash.log");
+                        java.io.PrintWriter pw = new java.io.PrintWriter(new java.io.FileWriter(f, true));
+                        pw.println("==== " + new java.util.Date() + " thread=" + t.getName());
+                        e.printStackTrace(pw);
+                        pw.println();
+                        pw.close();
+                    } catch (Throwable ignore) {
+                    }
+                    if (prevHandler != null) {
+                        prevHandler.uncaughtException(t, e);
+                    }
+                }
+            });
+        } catch (Throwable ignore) {
+        }
+
+        try {
             // One-time migration: older builds shipped with the system TTS selected and
             // the saved profile kept overriding the new Kokoro default. Flip it once so
             // existing installs get the offline AI voice without touching settings.

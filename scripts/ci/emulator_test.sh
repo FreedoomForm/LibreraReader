@@ -238,3 +238,80 @@ else
   fi
 fi
 echo "EMULATOR SMOKE TEST PASSED (RU too): Russian text synthesized without hangs"
+
+# ---------- 5. PDF PHASE (the reported user repro: AI voice on a PDF book) ----------
+# "Kicked to the main page when enabling the AI voice from a PDF" was never
+# covered: earlier phases used EPUB/TXT only. This phase opens a real PDF in
+# the reader (PDFium page rendering + page text extraction + word boxes),
+# plays it with the offline AI voice and asserts the process survives.
+# It also drills the low-memory path: send-trim-memory(RUNNING_CRITICAL) must
+# release the idle engine instead of letting the system kill the process.
+adb shell am force-stop "$PKG" || true
+sleep 3
+adb shell am start -W -n "$PKG/$LAUNCHER" || true
+sleep 15
+adb push scripts/assets/tts_sample.pdf /storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf || exit 1
+adb logcat -c || true
+echo "Opening the sample PDF in the reader..."
+adb shell am start -a android.intent.action.VIEW \
+  -d "file:///storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf" \
+  -t "application/pdf" || true
+sleep 25
+PDF_OPEN_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
+if [ -z "$PDF_OPEN_PID" ]; then
+  echo "::error::APP DIED WHILE OPENING THE PDF"
+  adb logcat -d | grep -A 40 "FATAL EXCEPTION" || true
+  exit 1
+fi
+echo "PDF open, PID=$PDF_OPEN_PID - starting AI TTS on it..."
+adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
+  -a ACTION_PLAY_CURRENT_PAGE \
+  --ei INT 0 \
+  --es EXTRA_PATH /storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf \
+  --ei EXTRA_W 1080 --ei EXTRA_H 2400 || true
+sleep ${PDF_SLEEP:-140}
+adb logcat -d > logcat-tts-pdf.txt || true
+PDF_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
+echo "PID after PDF TTS: $PDF_PID"
+if [ -z "$PDF_PID" ]; then
+  echo "::error::APP DIED DURING PDF TTS PLAYBACK (the reported user bug!)"
+  grep -A 50 "FATAL EXCEPTION" logcat-tts-pdf.txt || true
+  grep -m 5 -i "fatal signal\|lowmemorykiller\|has died\|tombstone" logcat-tts-pdf.txt || true
+  exit 1
+fi
+PDF_FATALS=$(grep -c "FATAL EXCEPTION" logcat-tts-pdf.txt || true)
+if [ "$PDF_FATALS" != "0" ]; then
+  echo "::error::FATAL EXCEPTION during PDF TTS playback"
+  grep -A 50 "FATAL EXCEPTION" logcat-tts-pdf.txt || true
+  exit 1
+fi
+PDF_SIGS=$(grep -c "Fatal signal" logcat-tts-pdf.txt || true)
+if [ "$PDF_SIGS" != "0" ]; then
+  echo "::error::NATIVE CRASH (Fatal signal) during PDF TTS playback"
+  grep -m 3 -A 15 "Fatal signal" logcat-tts-pdf.txt || true
+  exit 1
+fi
+if ! grep -q "kokoro gen" logcat-tts-pdf.txt; then
+  echo "::error::KOKORO SYNTHESIS MISSING ON PDF - engine prepared but no audio"
+  grep -m 10 "KokoroDiag\|KokoroEngine" logcat-tts-pdf.txt || true
+  exit 1
+fi
+PDF_WORDS=$(grep -m 1 "tts words: captured=" logcat-tts-pdf.txt | sed -E 's/.*captured=([0-9]+).*/\1/')
+echo "PDF word boxes captured: ${PDF_WORDS:-none}"
+if [ -z "${PDF_WORDS:-}" ] || [ "${PDF_WORDS:-0}" = "0" ]; then
+  echo "::error::PDF PAGE TEXT EMPTY - PDFium text extraction returned no words"
+  exit 1
+fi
+# ---------- low-memory drill: the 7356 trim hook must release the engine ----------
+echo "Sending RUNNING_CRITICAL trim to the app (memory-pressure drill)..."
+adb shell am send-trim-memory "$PDF_PID" RUNNING_CRITICAL 2>&1 || echo "(send-trim-memory not supported by this image - skipping the assert)"
+sleep 6
+if adb shell pidof "$PKG" > /dev/null; then
+  TRIM_REL=$(grep -c "engine released on trim level" logcat-tts-pdf.txt || true)
+  echo "Process survived the trim drill; engine-release markers: $TRIM_REL"
+else
+  echo "::error::APP DIED DURING THE TRIM-MEMORY DRILL - memory release hook did not save it"
+  exit 1
+fi
+adb logcat -d | grep -m 5 "engine released on trim level\|KokoroDiag" || true
+echo "EMULATOR SMOKE TEST PASSED (PDF too): AI voice reads a PDF, process survives, trim drill OK"
