@@ -293,7 +293,7 @@ public class TTSEngine {
         LOG.d(TAG, "stop");
         kokoroPlaySeq.incrementAndGet();
         ttsRangeIndex.clear();
-        // DFN3 enhanced playback: release the AudioTrack, flush the queue and
+        // Enhanced playback: release the AudioTrack, flush the queue and
         // restore the engine's progress listener (no-op when not active)
         try {
             com.foobnix.ai.ReuseVoicePlayer.get().stop();
@@ -376,7 +376,7 @@ public class TTSEngine {
         }
     }
 
-    /** the service's utterance listener (used by the DFN3 player as downstream) */
+    /** the service's utterance listener (used by the polish player as downstream) */
     public UtteranceProgressListener getKokoroProgressListener() {
         return kokoroProgressListener;
     }
@@ -589,10 +589,10 @@ public class TTSEngine {
     }
 
     /**
-     * true when the user asked for the enhanced voice (DeepFilterNet3
-     * + loudness polish). The enhancement targets the SYSTEM voice output:
-     * when Kokoro is enabled it handles English text itself (early return
-     * above), so what reaches this point with Kokoro on is exactly the
+     * true when the user asked for the enhanced voice (loudness + clarity
+     * polish). The enhancement targets the SYSTEM voice output:
+     * when the AI voice is enabled it handles English text itself (early return
+     * above), so what reaches this point with the AI voice on is exactly the
      * system-voice fallback (non-English books, engine failure) - and that
      * is what gets enhanced.
      */
@@ -601,8 +601,8 @@ public class TTSEngine {
     }
 
     /**
-     * Queues the page paragraphs into the DFN3 player instead of the TTS
-     * playback queue. Returns false when the system engine is unavailable
+     * Queues the page paragraphs into the enhanced (polish) player instead of
+     * the TTS playback queue. Returns false when the system engine is unavailable
      * (the caller falls back to the plain speak path).
      */
     private boolean speakEnhancedLocked(final String text) {
@@ -681,7 +681,7 @@ public class TTSEngine {
         }
         if (useEnhancePath()) {
             // Enhanced system voice: paragraphs go through
-            // synthesizeToFile -> DeepFilterNet3 + loudness polish ->
+            // synthesizeToFile -> loudness/clarity polish ->
             // AudioTrack. The playback completion re-fires the same utterance
             // callbacks, so the service protocol (bookmarks, page turns,
             // stop) is unchanged.
@@ -979,7 +979,7 @@ public class TTSEngine {
 
     public String getCurrentEngineName() {
         if (AppState.get().ttsUseKokoro) {
-            return "Kokoro-82M (AI)";
+            return "Inflect Nano (AI)";
         }
         try {
             if (ttsEngine != null) {
@@ -1114,7 +1114,7 @@ public class TTSEngine {
     }
 
     /**
-     * Offline AI voice (Kokoro-82M): same queue protocol as the system engine
+     * Offline AI voice (Inflect-Nano-v2): same queue protocol as the system engine
      * (STOP_SIGNAL / FINISHED_SIGNAL+i / UTTERANCE_ID_DONE).
      */
     private void kokoroSpeakLocked(final String text) {

@@ -2,7 +2,7 @@ package com.foobnix.ai;
 
 /**
  * Audible "voice polish" post-chain for TTS playback, applied whenever the
- * user enables voice enhancement (see {@link VoiceEnhancer}).
+ * user enables voice enhancement (AppState.ttsVoiceEnhance).
  * <p>
  * A denoiser such as DeepFilterNet3 is nearly transparent on already-clean
  * TTS audio - there is no noise to remove, so the toggle produced no audible
@@ -17,9 +17,8 @@ package com.foobnix.ai;
  *
  * Pure Java, no Android imports (unit-testable off-device). The chain is
  * length-preserving and deterministic per utterance, so word-highlight
- * timing is unaffected. It always runs when enhancement is on - even when
- * the DeepFilterNet3 model itself is unavailable or was auto-disabled on a
- * slow device - so the toggle always has an audible effect.
+ * timing is unaffected. It always runs when enhancement is on, so the
+ * toggle always has an audible effect.
  */
 public final class VoicePolish {
     /** loudness target: -17 dBFS RMS */

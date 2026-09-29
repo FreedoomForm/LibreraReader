@@ -22,13 +22,11 @@ assert 1e7 < dec < 2e7, 'decode.onnx size looks wrong: %d' % dec
 lex = z.getinfo('assets/inflect/lexicon-en.txt').file_size
 assert lex > 1000000, 'lexicon-en.txt looks truncated: %d' % lex
 
-# --- DeepFilterNet3 voice enhancement models (committed weights)
-dfn3 = {'assets/dfn3/enc.onnx', 'assets/dfn3/erb_dec.onnx', 'assets/dfn3/df_dec.onnx'}
-if dfn3 <= set(names):
-    print('OK: DeepFilterNet3 enhancement models bundled (%.1f MB total)' % (
-        sum(z.getinfo(x).file_size for x in dfn3) / 1048576.0))
-else:
-    raise AssertionError('FAIL: DeepFilterNet3 models missing from assets/dfn3/ - enhancement toggle will be unavailable')
+# --- DeepFilterNet3 removed in 7355: the models must NOT come back
+# (they cost 8.4 MB of assets + 3 ORT sessions of RAM for no audible gain)
+dfn3 = [x for x in names if x.startswith('assets/dfn3/')]
+assert not dfn3, 'FAIL: stale DeepFilterNet3 models still packaged: %s' % dfn3
+print('OK: no DeepFilterNet3 assets (removed in 7355)')
 
 # --- native libs: only the ONNX Runtime AAR remains (sherpa was dropped)
 need(lambda x: x.startswith('lib/arm64-v8a/'), 'arm64-v8a native libs', 1)

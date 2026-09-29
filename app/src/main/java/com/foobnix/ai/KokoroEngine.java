@@ -175,6 +175,14 @@ public class KokoroEngine {
                     android.util.Log.i(DIAG_TAG, "kokoro init FAILED: " + e);
                     ready = false;
                     toastSafe("AI TTS init failed: " + e.getClass().getSimpleName());
+                    // flip the session fallback NOW instead of leaving the user
+                    // silent until the 120 s watchdog: the next page turn reads
+                    // with the system voice, and the user gets the explanation
+                    try {
+                        TTSEngine.get().onKokoroFailure();
+                    } catch (Throwable t) {
+                        LOG.e(t);
+                    }
                 } finally {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                     pendingOnReady.clear();
@@ -205,27 +213,52 @@ public class KokoroEngine {
         android.util.Log.i(DIAG_TAG, "model ready: duration.onnx=" + new File(dir, "duration.onnx").length()
                 + " decode.onnx=" + new File(dir, "decode.onnx").length()
                 + " lexicon=" + new File(dir, "lexicon-en.txt").length());
-        ortEnv = OrtEnvironment.getEnvironment();
-        OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
+        OrtSession dur = null;
+        OrtSession dec = null;
+        InflectFrontend fe = null;
         try {
-            // synthesis is the heavy part: give ONNX as many cores as we can spare
-            // (all but one on big phones; 2 on a weak 4-core device)
-            int cores = Runtime.getRuntime().availableProcessors();
-            int onnxThreads = Math.max(2, Math.min(6, cores - 1));
-            opts.setIntraOpNumThreads(onnxThreads);
-            LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
-        } catch (Throwable t) {
-            LOG.e(t);
+            ortEnv = OrtEnvironment.getEnvironment();
+            OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
+            try {
+                // synthesis is the heavy part; every ORT thread carries its own
+                // memory arena, so on a phone that also renders PDF pages the
+                // thread count (and peak RAM) is kept low: 2-3 threads keep RTF
+                // well under 1 for this 16 MB model and leave RAM for the reader
+                int cores = Runtime.getRuntime().availableProcessors();
+                int onnxThreads = Math.max(2, Math.min(3, cores - 1));
+                opts.setIntraOpNumThreads(onnxThreads);
+                // fewer preallocated execution plans, smaller arena growth:
+                // lower peak memory at a negligible speed cost for this model
+                opts.setMemoryPatternOptimization(false);
+                try {
+                    opts.addConfigEntry("session.memory.arena_extend_strategy", "kSameAsRequested");
+                } catch (Throwable t) {
+                    LOG.d(TAG, "arena config rejected:", t);
+                }
+                LOG.d(TAG, "prepare: cores", cores, "onnxThreads", onnxThreads);
+            } catch (Throwable t) {
+                LOG.e(t);
+            }
+            dur = ortEnv.createSession(new File(dir, "duration.onnx").getAbsolutePath(), opts);
+            dec = ortEnv.createSession(new File(dir, "decode.onnx").getAbsolutePath(), opts);
+            fe = new InflectFrontend(new File(dir, "lexicon-en.txt"));
+            android.util.Log.i(DIAG_TAG, "inflect frontend ready: " + fe.lexiconSize() + " words");
+            durSession = dur;
+            decSession = dec;
+            frontend = fe;
+            ready = true;
+            LOG.d(TAG, "prepare done, sampleRate", SAMPLE_RATE);
+        } catch (Throwable e) {
+            // a half-initialized engine holds tens of MB in ORT arenas - release
+            // it right away so the fallback path starts from a clean heap
+            close(dur);
+            close(dec);
+            durSession = null;
+            decSession = null;
+            frontend = null;
+            ready = false;
+            throw e;
         }
-        OrtSession dur = ortEnv.createSession(new File(dir, "duration.onnx").getAbsolutePath(), opts);
-        OrtSession dec = ortEnv.createSession(new File(dir, "decode.onnx").getAbsolutePath(), opts);
-        InflectFrontend fe = new InflectFrontend(new File(dir, "lexicon-en.txt"));
-        android.util.Log.i(DIAG_TAG, "inflect frontend ready: " + fe.lexiconSize() + " words");
-        durSession = dur;
-        decSession = dec;
-        frontend = fe;
-        ready = true;
-        LOG.d(TAG, "prepare done, sampleRate", SAMPLE_RATE);
     }
 
     public void stopInternal() {

@@ -24,11 +24,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Real-time DeepFilterNet3 voice enhancement pipeline for the SYSTEM TTS engine.
+ * Real-time voice-enhancement pipeline for the SYSTEM TTS engine.
  * <p>
  * Instead of letting the engine play the synthesized audio directly, each
  * page paragraph is synthesized to a WAV file (synthesizeToFile), filtered
- * through {@link VoiceEnhancer} (DeepFilterNet3, ONNX) and played back
+ * through {@link VoicePolish} (loudness/clarity, pure Java) and played back
  * through an AudioTrack. Word-highlight ranges reported during synthesis
  * (onRangeStart) are re-fired at the exact playback position, so the
  * highlight stays glued to the enhanced audio.
@@ -37,14 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * utterance callbacks (fireKokoroDone / downstream listener) that the plain
  * system-TTS path fires at synthesis completion, so paragraph bookmarks,
  * page turns, stop signals and the sleep timer all behave identically.
- * If the device is too slow for the model, the DFN3 stage turns itself off
- * and reading continues with the loudness-polished voice - playback never
- * stalls.
  */
 public class ReuseVoicePlayer {
     private static final String TAG = "ReuseVoicePlayer";
-    /** if the enhancement runs slower than this factor of realtime, give it up */
-    private static final double MIN_SPEED_FACTOR = 1.15;
 
     private static ReuseVoicePlayer INSTANCE = new ReuseVoicePlayer();
 
@@ -74,19 +69,13 @@ public class ReuseVoicePlayer {
     private volatile AudioTrack track;
     private volatile UtteranceProgressListener ownListener;
     private UtteranceProgressListener savedListener;
-    private volatile boolean slowDeviceDisabled = false;
-    private int slowStreak = 0;
 
     public boolean isActive() {
         return ownListener != null;
     }
 
-    public boolean isSlowDeviceDisabled() {
-        return slowDeviceDisabled;
-    }
-
+    /** VoicePolish is stateless pure Java - no model warm-up needed. */
     public void prepareAsync() {
-        VoiceEnhancer.get().prepareAsync();
     }
 
     /**
@@ -305,37 +294,16 @@ public class ReuseVoicePlayer {
         it.sampleRate = lastRate;
         boolean enhanced = false;
         if (AppState.get().ttsVoiceEnhance) {
-            // VoiceEnhancer always applies the audible polish chain; the DFN3
-            // model stage runs on top when its models are loaded and it was
-            // not auto-disabled on a slow device.
+            // the audible polish chain (pure Java, no model): loudness + clarity
             short[] before = pcm;
-            long t0 = android.os.SystemClock.elapsedRealtime();
-            short[] after = VoiceEnhancer.get().enhance(pcm, it.sampleRate);
-            long dt = android.os.SystemClock.elapsedRealtime() - t0;
+            short[] after = VoicePolish.apply(pcm, it.sampleRate);
             if (after != null && after != before && after.length > 0) {
                 pcm = after;
                 enhanced = true;
-                if (!VoiceEnhancer.get().isDfn3Disabled()) {
-                    double audioSec = (double) after.length / it.sampleRate;
-                    double factor = audioSec / Math.max(0.001, dt / 1000.0);
-                    if (factor < MIN_SPEED_FACTOR) {
-                        if (++slowStreak >= 2) {
-                            VoiceEnhancer.get().setDfn3Disabled(true);
-                            slowDeviceDisabled = true;
-                            android.util.Log.i(KokoroEngine.DIAG_TAG,
-                                    "DFN3 disabled: device too slow (factor " + factor
-                                    + "); polish continues");
-                            toastSlow();
-                        }
-                    } else {
-                        slowStreak = 0;
-                    }
-                }
             }
         }
-        android.util.Log.i(KokoroEngine.DIAG_TAG, "dfn3 utterance: samples=" + pcm.length
-                + " rate=" + it.sampleRate + " enhanced=" + enhanced
-                + " dfn3=" + !VoiceEnhancer.get().isDfn3Disabled());
+        android.util.Log.i(KokoroEngine.DIAG_TAG, "tts utterance: samples=" + pcm.length
+                + " rate=" + it.sampleRate + " enhanced=" + enhanced);
 
         // ---- 3. play through AudioTrack ----
         fireStart(it.utteranceId);
@@ -456,14 +424,6 @@ public class ReuseVoicePlayer {
 
     private void fireDone(String utteranceId) {
         TTSEngine.get().fireKokoroDone(utteranceId);
-    }
-
-    private void toastSlow() {
-        try {
-            android.widget.Toast.makeText(LibreraApp.context, R.string.tts_voice_enhance_slow,
-                    android.widget.Toast.LENGTH_LONG).show();
-        } catch (Throwable t) {
-        }
     }
 
     private int lastRate = 22050;

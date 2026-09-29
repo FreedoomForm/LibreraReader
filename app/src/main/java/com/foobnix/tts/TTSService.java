@@ -1200,7 +1200,7 @@ import java.util.List;
 
                              @Override public void onError(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onError", utteranceId);
-                                 if (!utteranceId.equals(TTSEngine.UTTERANCE_ID_DONE)) {
+                                 if (utteranceId == null || !utteranceId.equals(TTSEngine.UTTERANCE_ID_DONE)) {
                                      return;
                                  }
                                  stopMediaSesstionAndReleaweWakeLock();
@@ -1211,6 +1211,9 @@ import java.util.List;
                              @Override public void onDone(String utteranceId) {
 
                                  LOG.d(TAG, "onUtteranceCompleted", utteranceId);
+                                 if (utteranceId == null) {
+                                     return;
+                                 }
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 
@@ -1248,6 +1251,9 @@ import java.util.List;
                 TTSEngine.get()
                          .setKokoroLegacyListenerCompat(new OnUtteranceCompletedListener() {
                              @Override public void onUtteranceCompleted(String utteranceId) {
+                                 if (utteranceId == null) {
+                                     return;
+                                 }
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 

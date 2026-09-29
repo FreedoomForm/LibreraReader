@@ -126,12 +126,10 @@ jobs:
           PYEOF
           du -sh app/src/main/assets/inflect
 
-      # NOTE: DeepFilterNet3 (official 48kHz checkpoint, enc/erb_dec/df_dec
-      # split export) replaces the old RE-USE plan: RE-USE's Mamba scan needs
-      # RTF~65 on CPU - unusable on phones. DFN3 weights are committed under
-      # app/src/main/assets/dfn3/ and verified by scripts/ci/verify_apk.py.
-      # The Java DSP (Dfn3Dsp) was validated bit-accurate against the
-      # reference implementation (SNR 71.5 dB).
+      # NOTE: DeepFilterNet3 was removed in 7355 (user feedback: no audible
+      # benefit on clean TTS audio, yet it cost APK size and RAM for 3 extra
+      # ORT sessions - a crash risk on low-memory devices reading PDFs).
+      # The audible loudness/clarity polish (VoicePolish, pure Java) remains.
 
       # NOTE: the TTS engine runs through the ONNX Runtime AAR directly
       # (duration + decode graphs), so no native sherpa-onnx build is needed
@@ -178,11 +176,11 @@ jobs:
             find app/build/outputs -type f | head -30
             exit 1
           fi
-          cp "$APK" dist/Librera-AI-Kokoro.apk
+          cp "$APK" dist/Librera-AI-TTS.apk
           X86=$(find app/build/outputs/apk -name "*.apk" | grep -i "x86_64" | head -1)
-          if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-Kokoro-x86_64.apk; fi
+          if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-TTS-x86_64.apk; fi
           ARM=$(find app/build/outputs/apk -name "*.apk" | grep -i -- "-arm\." | head -1)
-          if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-AI-Kokoro-arm32.apk; fi
+          if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-AI-TTS-arm32.apk; fi
           ls -la dist
 
       - name: Verify installability (apksigner signature + 16KB alignment)
@@ -190,13 +188,13 @@ jobs:
           set -e
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           echo "apksigner: $APKSIGNER"
-          "$APKSIGNER" verify --verbose dist/Librera-AI-Kokoro.apk
-          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then
-            "$APKSIGNER" verify --verbose dist/Librera-AI-Kokoro-arm32.apk
+          "$APKSIGNER" verify --verbose dist/Librera-AI-TTS.apk
+          if [ -f dist/Librera-AI-TTS-arm32.apk ]; then
+            "$APKSIGNER" verify --verbose dist/Librera-AI-TTS-arm32.apk
           fi
           python3 - <<'PY'
           import struct, zipfile
-          for apk in ['dist/Librera-AI-Kokoro.apk', 'dist/Librera-AI-Kokoro-arm32.apk']:
+          for apk in ['dist/Librera-AI-TTS.apk', 'dist/Librera-AI-TTS-arm32.apk']:
               try:
                   z = zipfile.ZipFile(apk)
               except OSError:
@@ -300,7 +298,7 @@ jobs:
 
       - name: Run app on emulator (Android 14 / api 34, arm64 - what real phones run)
         env:
-          TEST_APK: dist/Librera-AI-Kokoro.apk
+          TEST_APK: dist/Librera-AI-TTS.apk
           TTS_SLEEP: "600"
           RU_SLEEP: "600"
           STRICT_RU: "0"
@@ -347,7 +345,7 @@ jobs:
           import json, os, time, urllib.request
           REPO = 'FreedoomForm/LibreraReader'
           TAG = 'librera-apk-latest'
-          KEEP = {'Librera-AI-Kokoro.apk', 'Librera-AI-Kokoro-arm32.apk', 'SHA256SUMS.txt'}
+          KEEP = {'Librera-AI-TTS.apk', 'Librera-AI-TTS-arm32.apk', 'SHA256SUMS.txt'}
           H = {'Authorization': 'token ' + os.environ['GITHUB_TOKEN'], 'User-Agent': 'ci-cleanup'}
           try:
               url = 'https://api.github.com/repos/%s/releases/tags/%s?nocache=%d' % (REPO, TAG, time.time_ns() % 10**9)
@@ -368,18 +366,18 @@ jobs:
       - name: Prepare release folder (only user-facing APKs)
         run: |
           mkdir -p dist/release
-          cp dist/Librera-AI-Kokoro.apk dist/release/
-          if [ -f dist/Librera-AI-Kokoro-arm32.apk ]; then
-            cp dist/Librera-AI-Kokoro-arm32.apk dist/release/
+          cp dist/Librera-AI-TTS.apk dist/release/
+          if [ -f dist/Librera-AI-TTS-arm32.apk ]; then
+            cp dist/Librera-AI-TTS-arm32.apk dist/release/
           fi
           ls -la dist/release
 
       - name: Generate SHA256SUMS (published files only)
         run: |
           cd dist/release
-          sha256sum Librera-AI-Kokoro.apk > SHA256SUMS.txt
-          if [ -f Librera-AI-Kokoro-arm32.apk ]; then
-            sha256sum Librera-AI-Kokoro-arm32.apk >> SHA256SUMS.txt
+          sha256sum Librera-AI-TTS.apk > SHA256SUMS.txt
+          if [ -f Librera-AI-TTS-arm32.apk ]; then
+            sha256sum Librera-AI-TTS-arm32.apk >> SHA256SUMS.txt
           fi
           cat SHA256SUMS.txt
 

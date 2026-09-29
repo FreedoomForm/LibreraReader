@@ -713,11 +713,7 @@
     <string name="tts_word_mode_on">Real-time word by word: ON</string>
     <string name="tts_word_mode_off">Real-time word by word: OFF</string>
     <string name="tts_voice_default">Engine default voice</string>
-    <string name="tts_voice_enhance_title">Enhance voice (DeepFilterNet3 + loudness)</string>
-    <string name="tts_voice_enhance_on">Voice enhancement (DeepFilterNet3): ON</string>
-    <string name="tts_voice_enhance_off">Voice enhancement (DeepFilterNet3): OFF</string>
-    <string name="tts_voice_enhance_slow">DeepFilterNet3 is disabled: the device is too slow for the model. The loudness and clarity polish still applies.</string>
-    <string name="tts_voice_enhance_ready">DeepFilterNet3 voice enhancement active</string>
+    <string name="tts_voice_enhance_title">Enhance voice (loudness + clarity)</string>
     <string name="tts_add_voice">\u002b Add voice</string>
     <string name="tts_record_voice">Record a voice</string>
     <string name="tts_choose_voice_file">Choose an audio file (MP3)</string>

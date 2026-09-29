@@ -905,15 +905,20 @@ public class DragingDialogs {
                 }
                 ttsKokoroSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
-                        if (isChecked) {
-                            // the user turns the AI voice back ON - clear the failure fallback
-                            TTSEngine.kokoroFallbackActive = false;
+                        try {
+                            if (isChecked) {
+                                // the user turns the AI voice back ON - clear the failure fallback
+                                TTSEngine.kokoroFallbackActive = false;
+                            }
+                            AppState.get().ttsUseKokoro = isChecked;
+                            AppState.get().save(activity);
+                            textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
+                            TTSEngine.get().stop();
+                            org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
+                        } catch (Throwable t) {
+                            // toggling the voice must never crash the reader session
+                            LOG.e(t);
                         }
-                        AppState.get().ttsUseKokoro = isChecked;
-                        AppState.get().save(activity);
-                        textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
-                        TTSEngine.get().stop();
-                        org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
                     }
                 });
                 // ---- system engine voice + custom (recorded/imported) voices ----
@@ -1052,15 +1057,19 @@ public class DragingDialogs {
                             .add(activity.getString(R.string.tts_engine_kokoro) + " \u2713")
                             .setOnMenuItemClickListener(new OnMenuItemClickListener() {
                                 @Override public boolean onMenuItemClick(MenuItem item) {
-                                    TTSEngine.get().stop();
-                                    AppState.get().ttsUseKokoro = true;
-                                    TTSEngine.kokoroFallbackActive = false;
-                                    KokoroEngine.get().prepareAsync(null, true);
-                                    AppState.get().save(activity);
-                                    textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                                    ttsKokoroSwitch.setChecked(true);
-                                    org.greenrobot.eventbus.EventBus.getDefault()
-                                            .post(new com.foobnix.tts.TtsStatus());
+                                    try {
+                                        TTSEngine.get().stop();
+                                        AppState.get().ttsUseKokoro = true;
+                                        TTSEngine.kokoroFallbackActive = false;
+                                        KokoroEngine.get().prepareAsync(null, true);
+                                        AppState.get().save(activity);
+                                        textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
+                                        ttsKokoroSwitch.setChecked(true);
+                                        org.greenrobot.eventbus.EventBus.getDefault()
+                                                .post(new com.foobnix.tts.TtsStatus());
+                                    } catch (Throwable t) {
+                                        LOG.e(t);
+                                    }
                                     return false;
                                 }
                             });
