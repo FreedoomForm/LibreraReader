@@ -122,12 +122,12 @@ public final class InflectFrontend {
                     appendWord(out, phones, word.length() > 0);
                     word.setLength(0);
                     out.append(ch); // punctuation glues directly to the previous word
-                } else if (ch == '-' || ch == '\u2013' || ch == '\u2014') {
+                } else if (ch == '-' || ch == (char) 0x2013 || ch == (char) 0x2014) {
                     // hyphen acts as a word boundary
                     String phones = lookupWord(word.toString());
                     appendWord(out, phones, true);
                     word.setLength(0);
-                } else if (ch == '\'' || ch == '\u2019') {
+                } else if (ch == '\'' || ch == (char) 0x2019) {
                     // contractions: don't == dont
                 } else {
                     word.append(Character.toLowerCase(ch));
@@ -441,13 +441,20 @@ public final class InflectFrontend {
      * books) fall through to the plain number path.
      */
     public static String normalizeText(String text) {
-        text = text.replace('\u2018', '\'').replace('\u2019', '\'')
-                .replace('\u201c', '"').replace('\u201d', '"')
-                .replace('\u2013', '-').replace('\u2014', ', ')
-                .replace('\u2026', "...")
-                .replace('(', ',').replace(')', ',')
-                .replace('[', ',').replace(']', ',')
-                .replace('{', ',').replace('}', ',');
+        // NOTE: unicode escape sequences are processed by the javac lexer
+        // before tokenization, so a backslash-u escape inside a char literal
+        // turns into the raw character - use (char) casts instead
+        text = text
+                .replace(Character.toString((char) 0x2018), "'")
+                .replace(Character.toString((char) 0x2019), "'")
+                .replace(Character.toString((char) 0x201C), "\"")
+                .replace(Character.toString((char) 0x201D), "\"")
+                .replace(Character.toString((char) 0x2013), "-")
+                .replace(Character.toString((char) 0x2014), ", ")
+                .replace(Character.toString((char) 0x2026), "...")
+                .replace("(", ", ").replace(")", ", ")
+                .replace("[", ", ").replace("]", ", ")
+                .replace("{", ", ").replace("}", ", ");
         text = text.replaceAll("\\s+", " ").trim();
 
         String[][] abbr = {
