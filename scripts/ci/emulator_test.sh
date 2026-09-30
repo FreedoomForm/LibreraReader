@@ -252,8 +252,12 @@ adb shell am start -W -n "$PKG/$LAUNCHER" || true
 sleep 15
 adb push scripts/assets/tts_sample.pdf /storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf || exit 1
 adb logcat -c || true
-echo "Opening the sample PDF in the reader..."
-adb shell am start -a android.intent.action.VIEW \
+echo "Opening the sample PDF in the reader (explicit component: the system"
+# "resolver would otherwise hijack the VIEW intent on images that ship
+# another application/pdf handler - the reader never opened and phase 5
+# silently degenerated into a service-only test"
+adb shell am start -n "$PKG/com.foobnix.OpenerActivity" \
+  -a android.intent.action.VIEW \
   -d "file:///storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf" \
   -t "application/pdf" || true
 sleep 25
@@ -261,6 +265,15 @@ PDF_OPEN_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
 if [ -z "$PDF_OPEN_PID" ]; then
   echo "::error::APP DIED WHILE OPENING THE PDF"
   adb logcat -d | grep -A 40 "FATAL EXCEPTION" || true
+  exit 1
+fi
+READER_FW=$(adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "topResumedActivity" || true)
+echo "Foreground after PDF open: $READER_FW"
+if ! echo "$READER_FW" | grep -q "ViewActivity"; then
+  echo "::error::READER IS NOT IN THE FOREGROUND AFTER OPENING THE PDF (resolver/library stole the intent) - the PDF UI repro is not covered without this"
+  adb shell uiautomator dump /sdcard/ui-pdf.xml > /dev/null 2>&1 || true
+  adb pull /sdcard/ui-pdf.xml ui-pdf.xml > /dev/null 2>&1 || true
+  grep -o 'resource-id="[^"]\{1,60\}"' ui-pdf.xml 2>/dev/null | head -20 || true
   exit 1
 fi
 echo "PDF open, PID=$PDF_OPEN_PID - starting AI TTS on it..."
