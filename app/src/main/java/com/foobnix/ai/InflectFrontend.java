@@ -244,6 +244,62 @@ public final class InflectFrontend {
      *  chunks were pushing the process over the LMK line mid-play */
     private static final int CHUNK_LIMIT = 140;
 
+    /**
+     * Hard cap on the PHONEME string length per single decode call.
+     *
+     * CHUNK_LIMIT caps the TEXT length, but phonemes run ~1.5-2x longer than
+     * the source characters (lexicon IPA strings), and toTokenIds interleaves
+     * a blank after every phoneme - so a 140-char chunk can still produce
+     * 500+ tokens (T≈1300 frames). The CI emulator repro of the native
+     * crash (SIGSEGV inside OrtSession.run, registers holding frame indices
+     * ~1305) hit EXACTLY such a chunk while a PDF was open: the decode graph's
+     * transient allocation scales with T, and at T≈1300 the process hits the
+     * native memory limit while PDF bitmaps + the model are resident.
+     * 200 phonemes -> <=401 tokens -> T<=~820 keeps the decode peak at the
+     * measured ~85-100 MB level regardless of how "phoneme-dense" the text is.
+     */
+    public static final int PHONEME_LIMIT = 200;
+
+    /**
+     * Splits a phoneme string into decode-sized pieces on word boundaries
+     * (spaces). Words longer than the limit are cut hard - the edge fade in
+     * the engine masks the seam. Never returns empty pieces.
+     */
+    public static java.util.List<String> splitPhonemes(String phones, int limit) {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        if (phones == null) {
+            return out;
+        }
+        if (phones.length() <= limit) {
+            out.add(phones);
+            return out;
+        }
+        int start = 0;
+        final int n = phones.length();
+        while (start < n) {
+            if (n - start <= limit) {
+                out.add(phones.substring(start));
+                break;
+            }
+            int end = start + limit;
+            int space = phones.lastIndexOf(' ', end);
+            if (space <= start) {
+                end = start + limit; // one monster word - hard cut
+            } else {
+                end = space;
+            }
+            String piece = phones.substring(start, end).trim();
+            if (!piece.isEmpty()) {
+                out.add(piece);
+            }
+            start = end;
+            while (start < n && phones.charAt(start) == ' ') {
+                start++;
+            }
+        }
+        return out;
+    }
+
     /** sentence split with the reference runner's length cap and pause rules */
     public static List<String> splitSentences(String text) {
         String norm = text.replaceAll("\\s+", " ").trim();

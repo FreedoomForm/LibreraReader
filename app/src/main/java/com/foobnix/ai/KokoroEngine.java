@@ -1086,84 +1086,128 @@ public class KokoroEngine {
                 if (phones == null) {
                     continue;
                 }
-                long[] ids = InflectFrontend.toTokenIds(phones);
-                if (ids == null || ids.length < 4) {
-                    continue;
-                }
-                durInputs.put("tokens", OnnxTensor.createTensor(ortEnv,
-                        LongBuffer.wrap(ids), new long[]{1, ids.length}));
-                durInputs.put("lengths", OnnxTensor.createTensor(ortEnv,
-                        LongBuffer.wrap(new long[]{ids.length}), new long[]{1}));
-                durInputs.put("length_scale", OnnxTensor.createTensor(ortEnv,
-                        FloatBuffer.wrap(new float[]{lengthScale}), new long[]{}));
-                try {
-                    durRes = dur.run(durInputs);
-                    OnnxTensor mT = (OnnxTensor) durRes.get("m_p_exp").orElse(null);
-                    OnnxTensor logsT = (OnnxTensor) durRes.get("logs_p_exp").orElse(null);
-                    OnnxTensor maskT = (OnnxTensor) durRes.get("y_mask").orElse(null);
-                    if (mT == null || logsT == null || maskT == null) {
+                // A 140-char TEXT chunk can phonemize into 300+ IPA characters
+                // (lexicon strings run longer than the source words), which
+                // with blank interleaving means T≈1300 decode frames and a
+                // ~200 MB transient allocation - exactly what crashed the
+                // process natively on the emulator with a PDF open. Cap the
+                // DECODE size by splitting the phoneme string on word
+                // boundaries; the audio plays back seamlessly (edge-faded).
+                java.util.List<String> subPhones =
+                        InflectFrontend.splitPhonemes(phones, InflectFrontend.PHONEME_LIMIT);
+                for (int s = 0; s < subPhones.size(); s++) {
+                    if (aborted) {
+                        return;
+                    }
+                    String part = subPhones.get(s);
+                    long[] sids = InflectFrontend.toTokenIds(part);
+                    if (sids == null || sids.length < 4) {
                         continue;
                     }
-                    long[] mShape = mT.getInfo().getShape();
-                    float[] m = flat(mT);
-                    float[] logs = flat(logsT);
-                    float[] mask = flat(maskT);
-                    if (m == null) {
-                        continue;
+                    if (subPhones.size() > 1) {
+                        android.util.Log.i(DIAG_TAG, "gen subchunk " + (s + 1) + "/" + subPhones.size()
+                                + ": phones=" + part.length() + " tokens=" + sids.length);
+                    } else {
+                        android.util.Log.i(DIAG_TAG, "gen chunk: phones=" + part.length()
+                                + " tokens=" + sids.length
+                                + " nativeHeap=" + (android.os.Debug.getNativeHeapAllocatedSize() >> 20) + "MB");
                     }
-                    // gaussian latent noise, seeded per chunk (reference: seed + index)
-                    Random rng = new Random(1000L + i);
-                    float[] noise = new float[m.length];
-                    for (int k = 0; k < noise.length; k++) {
-                        noise[k] = (float) rng.nextGaussian();
+                    boolean ok = synthesizeTokens(sids, i * 7 + s, lengthScale, dur, dec, cb);
+                    if (!ok) {
+                        return; // aborted or sink stopped
                     }
-                    decInputs.put("m_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(m), mShape));
-                    decInputs.put("logs_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(logs), mShape));
-                    decInputs.put("y_mask", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(mask),
-                            new long[]{1, 1, mShape.length > 2 ? mShape[2] : 0}));
-                    decInputs.put("zp_noise", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(noise), mShape));
-                    decInputs.put("noise_scale", OnnxTensor.createTensor(ortEnv,
-                            FloatBuffer.wrap(new float[]{0.667f}), new long[]{}));
-                    try {
-                        decRes = dec.run(decInputs);
-                        OnnxTensor wavT = (OnnxTensor) decRes.get("waveform").orElse(null);
-                        if (wavT == null) {
-                            continue;
-                        }
-                        float[] wav = flat(wavT);
-                        if (wav == null || wav.length == 0) {
-                            continue;
-                        }
-                        edgeFade(wav, SAMPLE_RATE, 5);
-                        final int SLICE = 4800;
-                        int off = 0;
-                        while (off < wav.length) {
-                            if (aborted) {
-                                return;
-                            }
-                            int len = Math.min(SLICE, wav.length - off);
-                            float[] slice = new float[len];
-                            System.arraycopy(wav, off, slice, 0, len);
-                            Integer r = cb.invoke(slice);
-                            if (r == null || r == 0) {
-                                return;
-                            }
-                            off += len;
-                        }
-                    } finally {
-                        closeQuietly(decRes);
-                        decRes = null;
-                        closeTensors(decInputs);
-                    }
-                } finally {
-                    closeQuietly(durRes);
-                    durRes = null;
-                    closeTensors(durInputs);
                 }
             }
         } finally {
             closeTensors(durInputs);
             closeTensors(decInputs);
+        }
+    }
+
+    /**
+     * Runs duration + decode for ONE token sequence and streams the resulting
+     * waveform into the callback. Split out of generateStream so long phoneme
+     * strings can be synthesized in decode-sized pieces without nesting tensor
+     * lifecycle management inside two loops.
+     *
+     * @return false when the caller must stop (aborted or the sink closed)
+     */
+    private boolean synthesizeTokens(long[] ids, int seed, float lengthScale, OrtSession dur, OrtSession dec,
+            SynthCallback cb) throws Throwable {
+        Map<String, OnnxTensor> durInputs = new LinkedHashMap<String, OnnxTensor>();
+        Map<String, OnnxTensor> decInputs = new LinkedHashMap<String, OnnxTensor>();
+        OrtSession.Result durRes = null;
+        OrtSession.Result decRes = null;
+        try {
+            durInputs.put("tokens", OnnxTensor.createTensor(ortEnv,
+                    LongBuffer.wrap(ids), new long[]{1, ids.length}));
+            durInputs.put("lengths", OnnxTensor.createTensor(ortEnv,
+                    LongBuffer.wrap(new long[]{ids.length}), new long[]{1}));
+            durInputs.put("length_scale", OnnxTensor.createTensor(ortEnv,
+                    FloatBuffer.wrap(new float[]{lengthScale}), new long[]{}));
+            durRes = dur.run(durInputs);
+            OnnxTensor mT = (OnnxTensor) durRes.get("m_p_exp").orElse(null);
+            OnnxTensor logsT = (OnnxTensor) durRes.get("logs_p_exp").orElse(null);
+            OnnxTensor maskT = (OnnxTensor) durRes.get("y_mask").orElse(null);
+            if (mT == null || logsT == null || maskT == null) {
+                return true; // nothing speakable in this piece - keep going
+            }
+            long[] mShape = mT.getInfo().getShape();
+            float[] m = flat(mT);
+            float[] logs = flat(logsT);
+            float[] mask = flat(maskT);
+            if (m == null) {
+                return true;
+            }
+            android.util.Log.i(DIAG_TAG, "gen duration OK: T=" + (mShape.length > 2 ? mShape[2] : m.length)
+                    + " nativeHeap=" + (android.os.Debug.getNativeHeapAllocatedSize() >> 20) + "MB");
+            // gaussian latent noise, seeded per piece (reference: seed + index)
+            Random rng = new Random(1000L + seed);
+            float[] noise = new float[m.length];
+            for (int k = 0; k < noise.length; k++) {
+                noise[k] = (float) rng.nextGaussian();
+            }
+            decInputs.put("m_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(m), mShape));
+            decInputs.put("logs_p_exp", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(logs), mShape));
+            decInputs.put("y_mask", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(mask),
+                    new long[]{1, 1, mShape.length > 2 ? mShape[2] : 0}));
+            decInputs.put("zp_noise", OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(noise), mShape));
+            decInputs.put("noise_scale", OnnxTensor.createTensor(ortEnv,
+                    FloatBuffer.wrap(new float[]{0.667f}), new long[]{}));
+            try {
+                decRes = dec.run(decInputs);
+                OnnxTensor wavT = (OnnxTensor) decRes.get("waveform").orElse(null);
+                if (wavT == null) {
+                    return true;
+                }
+                float[] wav = flat(wavT);
+                if (wav == null || wav.length == 0) {
+                    return true;
+                }
+                edgeFade(wav, SAMPLE_RATE, 5);
+                final int SLICE = 4800;
+                int off = 0;
+                while (off < wav.length) {
+                    if (aborted) {
+                        return false;
+                    }
+                    int len = Math.min(SLICE, wav.length - off);
+                    float[] slice = new float[len];
+                    System.arraycopy(wav, off, slice, 0, len);
+                    Integer r = cb.invoke(slice);
+                    if (r == null || r == 0) {
+                        return false;
+                    }
+                    off += len;
+                }
+                return true;
+            } finally {
+                closeQuietly(decRes);
+                closeTensors(decInputs);
+            }
+        } finally {
+            closeQuietly(durRes);
+            closeTensors(durInputs);
         }
     }
 
