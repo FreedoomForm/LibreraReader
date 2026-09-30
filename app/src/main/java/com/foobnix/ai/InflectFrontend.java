@@ -129,6 +129,10 @@ public final class InflectFrontend {
                     word.setLength(0);
                 } else if (ch == '\'' || ch == (char) 0x2019) {
                     // contractions: don't == dont
+                } else if (ch == '"' || ch == (char) 0xAB || ch == (char) 0xBB) {
+                    // quotes carry no pronunciation: skipping them keeps the
+                    // lexicon lookup clean - a quoted word used to become
+                    // "\"word", miss the lexicon and get letter-spelled
                 } else {
                     word.append(Character.toLowerCase(ch));
                 }
@@ -196,17 +200,56 @@ public final class InflectFrontend {
         return spellLetters(w);
     }
 
-    /** letter-name spelling for out-of-vocabulary words */
+    /** Cyrillic (and a few other Latin-extended) letters -> latin translit,
+     *  so a foreign word inside mostly-English text still produces audio
+     *  instead of vanishing silently (the "some words are not spoken" bug) */
+    private static final Map<Character, String> TRANSLIT = new HashMap<Character, String>();
+
+    static {
+        final String cyr = "\u0430\u0431\u0432\u0433\u0434\u0435\u0451\u0436\u0437\u0438\u0439\u043a"
+                + "\u043b\u043c\u043d\u043e\u043f\u0440\u0441\u0442\u0443\u0444\u0445\u0446"
+                + "\u0447\u0448\u0449\u044b\u044d\u044e\u044f\u0456\u0457\u0454\u0491";
+        final String[] lat = {"a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k",
+                "l", "m", "n", "o", "p", "r", "s", "t", "u", "f", "h", "ts",
+                "ch", "sh", "sh", "y", "e", "yu", "ya", "i", "yi", "e", "g"};
+        for (int i = 0; i < cyr.length() && i < lat.length; i++) {
+            TRANSLIT.put(cyr.charAt(i), lat[i]);
+        }
+    }
+
+    /** letter-name spelling for out-of-vocabulary words (non-latin letters
+     *  are transliterated first, so they are heard as approximated letter
+     *  names instead of being dropped) */
     private String spellLetters(String w) {
         StringBuilder sb = new StringBuilder();
         boolean any = false;
         for (int i = 0; i < w.length(); i++) {
             char c = w.charAt(i);
+            String spoken = null;
             if (c >= 'a' && c <= 'z') {
+                spoken = LETTER_PHONES[c - 'a'];
+            } else {
+                final String tr = TRANSLIT.get(c);
+                if (tr != null) {
+                    // speak the transliterated letters' names
+                    final StringBuilder names = new StringBuilder();
+                    for (int k = 0; k < tr.length(); k++) {
+                        final char tc = tr.charAt(k);
+                        if (tc >= 'a' && tc <= 'z') {
+                            if (names.length() > 0) {
+                                names.append(' ');
+                            }
+                            names.append(LETTER_PHONES[tc - 'a']);
+                        }
+                    }
+                    spoken = names.toString();
+                }
+            }
+            if (spoken != null) {
                 if (any) {
                     sb.append(' ');
                 }
-                sb.append(LETTER_PHONES[c - 'a']);
+                sb.append(spoken);
                 any = true;
             }
         }

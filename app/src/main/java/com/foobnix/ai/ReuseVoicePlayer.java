@@ -60,6 +60,10 @@ public class ReuseVoicePlayer {
         volatile boolean aborted;
         // highlight ranges recorded during synthesis: [start, frame]
         final List<int[]> ranges = new ArrayList<int[]>();
+        /** registered word index {char starts, flat page indices} - used to
+         *  fire ESTIMATED highlight positions when the engine reports no
+         *  word ranges at all (range-less voices never highlighted here) */
+        int[][] estIndex;
         int sampleRate;
         short[] pcm;
     }
@@ -190,9 +194,15 @@ public class ReuseVoicePlayer {
     }
 
     public void enqueue(String text, String utteranceId) {
+        enqueue(text, utteranceId, null);
+    }
+
+    /** @param estIndex registered word index for estimated highlights (may be null) */
+    public void enqueue(String text, String utteranceId, final int[][] estIndex) {
         Item it = new Item();
         it.text = text;
         it.utteranceId = utteranceId;
+        it.estIndex = estIndex;
         queue.add(it);
         ensureWorker();
     }
@@ -287,6 +297,7 @@ public class ReuseVoicePlayer {
             fireDone(it.utteranceId);
             return;
         }
+        addEstimatedRanges(it);
 
         // ---- 3. play through AudioTrack ----
         fireStart(it.utteranceId);
@@ -433,6 +444,41 @@ public class ReuseVoicePlayer {
         android.util.Log.i(KokoroEngine.DIAG_TAG, "tts utterance: samples=" + pcm.length
                 + " rate=" + it.sampleRate);
         return true;
+    }
+
+    /**
+     * When the engine reported NO word ranges during synthesis (range-less
+     * voices - the same reason the plain system path falls back to word-by-
+     * word), estimated positions are derived from the registered word index:
+     * each word's char start maps proportionally onto the clip's frame span,
+     * so the highlight follows the audio instead of staying dead.
+     */
+    private void addEstimatedRanges(final Item it) {
+        if (!AppState.get().ttsWordHighlight || it.estIndex == null
+                || !it.ranges.isEmpty() || it.pcm == null || it.pcm.length == 0
+                || it.text == null || it.text.isEmpty()) {
+            return;
+        }
+        final int[] starts = it.estIndex[0];
+        final int[] flats = it.estIndex[1];
+        if (starts == null || flats == null || starts.length == 0) {
+            return;
+        }
+        final long totalFrames = it.pcm.length; // 16-bit mono: one frame per sample
+        final int textLen = Math.max(1, it.text.length());
+        synchronized (it.ranges) {
+            for (int k = 0; k < starts.length; k++) {
+                if (flats[k] < 0) {
+                    continue; // carried over / unmatched - nothing to mark
+                }
+                final long frame = (long) ((double) starts[k] / textLen * totalFrames);
+                it.ranges.add(new int[]{starts[k], (int) Math.min(frame, Integer.MAX_VALUE), starts[k]});
+            }
+        }
+        if (!it.ranges.isEmpty()) {
+            android.util.Log.i(KokoroEngine.DIAG_TAG, "tts estimated ranges: "
+                    + it.ranges.size() + " words (engine reported none)");
+        }
     }
 
     private void playBlocking(short[] pcm, Item it, int myGen) {

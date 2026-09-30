@@ -1211,6 +1211,9 @@ import java.util.List;
                              @Override public void onDone(String utteranceId) {
 
                                  LOG.d(TAG, "onUtteranceCompleted", utteranceId);
+                                 // conclude the word-range capability probe when the
+                                 // watched utterance (or the page) finishes
+                                 TTSEngine.get().noteSystemRangeProbe(utteranceId);
                                  if (utteranceId == null) {
                                      return;
                                  }

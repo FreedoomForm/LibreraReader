@@ -192,6 +192,19 @@ if grep -q "prefetch done" logcat-tts.txt; then
 else
   echo "WARN: no prefetch events observed (synthesis outran the queue - not fatal)"
 fi
+# ---------- exact word timing from the duration model (7360) ----------
+# Word highlight frames now come from the expanded duration features
+# (m_p_exp column-repeat boundaries) whenever the IPA units align with the
+# item's word list; otherwise the character-weight estimator is used. Report
+# the split (informational - the end-to-end gate stays on the events below).
+EXACT=$(grep -c "highlight exact:" logcat-tts.txt || true)
+ESTIM=$(grep -c "highlight estimated:" logcat-tts.txt || true)
+echo "Word timing: exact=${EXACT:-0} estimated=${ESTIM:-0}"
+if [ "${EXACT:-0}" = "0" ] && [ "${ESTIM:-0}" = "0" ]; then
+  echo "WARN: no word-timing schedules observed - no sentence clips played?"
+fi
+PROBE=$(grep -m 1 "system TTS word-range probe:" logcat-tts.txt || true)
+echo "System-voice range probe: ${PROBE:-not observed (AI voice read the whole session)}"
 # ---------- word-by-word highlight pipeline (service side, end to end) ----------
 # The service logs "tts words: captured=N" once per page (word boxes captured
 # from the page) and "tts word event: page=P idx=I" per spoken word matched to

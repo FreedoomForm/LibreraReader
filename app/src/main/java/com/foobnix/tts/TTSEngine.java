@@ -335,6 +335,8 @@ public class TTSEngine {
         kokoroPlaySeq.incrementAndGet();
         ttsRangeIndex.clear();
         systemTtsReady = false;
+        // a fresh reading session must re-probe the engine's word-range support
+        resetSystemRangeProbe();
         try {
             if (AppState.get().ttsUseKokoro) {
                 // keep the AI model warm in memory: the next Play must start
@@ -364,6 +366,8 @@ public class TTSEngine {
 
     public TextToSpeech setTTSWithEngine(String engine) {
         shutdown();
+        // a different engine may report word ranges after all - re-probe
+        resetSystemRangeProbe();
         synchronized (helpObject) {
             ttsEngine = new TextToSpeech(LibreraApp.context, listener, engine);
         }
@@ -405,6 +409,51 @@ public class TTSEngine {
     /** bumped on every kokoro play press and on stop() - invalidates stale fallback timers */
     private static final java.util.concurrent.atomic.AtomicLong kokoroPlaySeq =
             new java.util.concurrent.atomic.AtomicLong(0);
+
+    /**
+     * Word-range capability probe (SYSTEM voice). Since the word-by-word mode
+     * was removed, the system-voice word highlight relies solely on
+     * UtteranceProgressListener.onRangeStart (API 26+) - which many engines
+     * and voices (and several languages) NEVER fire, leaving the highlight
+     * completely dead. The probe watches the first spoken utterance of a
+     * session: if no usable range event arrived by the time it completes, the
+     * engine cannot drive the highlight and the system path falls back to
+     * word-by-word utterances ("ttsW<flat>") whose onStart events highlight
+     * every word on ANY engine - the old behavior the user remembers as
+     * "worked perfectly".
+     * -1 = probe in flight, 0 = ranges work (continuous reading), 1 = broken.
+     */
+    private volatile int sysRangeProbe = -1;
+    /** true once a range event mapped to a real page word this session */
+    private volatile boolean sysRangeSeen = false;
+    /** the utterance id whose completion concludes the probe */
+    private volatile String sysProbeUtterance = null;
+    /** last system voice applied - a voice change re-arms the probe */
+    private volatile String lastAppliedVoice = null;
+
+    /** called by the service whenever a system-voice utterance completes */
+    public void noteSystemRangeProbe(final String utteranceId) {
+        if (utteranceId == null || sysRangeProbe != -1) {
+            return;
+        }
+        final String probe = sysProbeUtterance;
+        final boolean isProbe = probe != null && probe.equals(utteranceId);
+        final boolean isDone = UTTERANCE_ID_DONE.equals(utteranceId);
+        if (!isProbe && !isDone) {
+            return;
+        }
+        sysRangeProbe = sysRangeSeen ? 0 : 1;
+        android.util.Log.i(KokoroEngine.DIAG_TAG, "system TTS word-range probe: "
+                + (sysRangeSeen ? "ranges OK - continuous reading"
+                                : "no usable ranges - word-by-word highlight fallback"));
+    }
+
+    /** a new session / new engine / new voice must re-probe */
+    public void resetSystemRangeProbe() {
+        sysRangeProbe = -1;
+        sysRangeSeen = false;
+        sysProbeUtterance = null;
+    }
 
     /**
      * Word boxes of the page currently being read (flat, reading order) plus
@@ -649,8 +698,8 @@ public class TTSEngine {
                         LOG.d("next-page signal");
                         break;
                     }
-                    registerRangeIndex(FINISHED_SIGNAL + i, big, sysAlign);
-                    reuse.enqueue(big, FINISHED_SIGNAL + i);
+                    final int[][] est = registerRangeIndexRet(FINISHED_SIGNAL + i, big, sysAlign);
+                    reuse.enqueue(big, FINISHED_SIGNAL + i, est);
                     LOG.d("pageHTML-parts", i, big);
                 }
             }
@@ -659,8 +708,8 @@ public class TTSEngine {
             String textToPlay = text.replace(TxtUtils.TTS_PAUSE, "");
             LOG.d("pageHTML-parts-single", text);
             final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
-            registerRangeIndex(UTTERANCE_ID_DONE, textToPlay, sysAlign);
-            reuse.enqueue(textToPlay, UTTERANCE_ID_DONE);
+            final int[][] est = registerRangeIndexRet(UTTERANCE_ID_DONE, textToPlay, sysAlign);
+            reuse.enqueue(textToPlay, UTTERANCE_ID_DONE, est);
         }
         return true;
     }
@@ -758,8 +807,22 @@ public class TTSEngine {
         LOG.d(TAG, "Speek s", AppState.get().ttsSpeed);
         LOG.d(TAG, "Speek AppSP.get().lastBookParagraph", AppSP.get().lastBookParagraph);
 
+        // engines that never report word ranges (most non-Google voices, and
+        // several languages) cannot drive the onRangeStart highlight - fall
+        // back to word-by-word utterances, whose onStart highlights every
+        // word on ANY engine (the old always-works behavior)
+        final boolean wordByWord = AppState.get().ttsWordHighlight && sysRangeProbe == 1;
+        final boolean armProbe = AppState.get().ttsWordHighlight && sysRangeProbe == -1;
+
         if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
+            if (wordByWord) {
+                speakWordByWord(parts);
+                return;
+            }
+            if (armProbe) {
+                sysProbeUtterance = FINISHED_SIGNAL + AppSP.get().lastBookParagraph;
+            }
             ttsEngine.playSilence(0l, TextToSpeech.QUEUE_FLUSH, mapTemp);
             final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
             // resuming mid-page: advance the word matcher over the paragraphs
@@ -807,6 +870,10 @@ public class TTSEngine {
             }
             ttsEngine.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
         } else {
+            if (wordByWord) {
+                speakWordByWord(new String[]{text});
+                return;
+            }
             String textToPlay = text.replace(TxtUtils.TTS_PAUSE, "");
             LOG.d("pageHTML-parts-single", text);
             final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
@@ -814,6 +881,71 @@ public class TTSEngine {
             ttsEngine.speak(textToPlay, TextToSpeech.QUEUE_FLUSH, map);
         }
 
+    }
+
+    /**
+     * Word-by-word highlight fallback: one utterance per readable token with
+     * the id "ttsW<flatWordIndex>" - the service's onStart handler highlights
+     * that word the moment its audio starts. Works with every engine and
+     * every language (the range probe switched the session here because the
+     * engine never fired usable onRangeStart events). Paragraph/resume/stop
+     * markers keep the exact same protocol as the continuous path.
+     */
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP) private void speakWordByWord(final String[] parts) {
+        final TextToSpeech t = ttsEngine;
+        if (t == null) {
+            return;
+        }
+        t.playSilence(0L, TextToSpeech.QUEUE_FLUSH, mapTemp);
+        final WordAlign sysAlign = new WordAlign(ttsSourceOffset);
+        for (int i = 0; i < parts.length; i++) {
+            String big = parts[i] == null ? "" : parts[i].trim();
+            if (TxtUtils.isEmpty(big)) {
+                continue;
+            }
+            if (big.length() == 1 && !Character.isLetterOrDigit(big.charAt(0))) {
+                continue;
+            }
+            if (big.contains(TxtUtils.TTS_SKIP)) {
+                continue;
+            }
+            if (big.contains(TxtUtils.TTS_STOP)) {
+                HashMap<String, String> mapStop = new HashMap<String, String>();
+                mapStop.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, STOP_SIGNAL);
+                t.playSilence(AppState.get().ttsPauseDuration, TextToSpeech.QUEUE_ADD, mapStop);
+            }
+            if (big.contains(TxtUtils.TTS_NEXT)) {
+                t.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
+                break;
+            }
+            for (final String w : big.split("\\s+")) {
+                if (TxtUtils.isEmpty(w) || normalizeWord(w).isEmpty()) {
+                    continue; // no speakable letters - no audio, no highlight
+                }
+                if (w.contains(TxtUtils.TTS_STOP) || w.contains(TxtUtils.TTS_NEXT)
+                        || w.contains(TxtUtils.TTS_SKIP) || w.contains(TxtUtils.TTS_PAUSE)) {
+                    continue; // protocol markers are never spoken
+                }
+                final int flat;
+                if (sysAlign.preLeft > 0) {
+                    sysAlign.preLeft--;
+                    flat = -1;
+                } else {
+                    flat = matchSourceWord(w, sysAlign.pagePtr);
+                    if (flat >= 0) {
+                        sysAlign.pagePtr = flat + 1;
+                    }
+                }
+                final HashMap<String, String> mw = new HashMap<String, String>();
+                mw.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, WORD_SIGNAL + flat);
+                t.speak(w, TextToSpeech.QUEUE_ADD, mw);
+            }
+            // keep the resume protocol: paragraph i finished
+            HashMap<String, String> mapFin = new HashMap<String, String>();
+            mapFin.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, FINISHED_SIGNAL + i);
+            t.playSilence(Math.max(0, AppState.get().ttsPauseDuration), TextToSpeech.QUEUE_ADD, mapFin);
+        }
+        t.playSilence(0L, TextToSpeech.QUEUE_ADD, map);
     }
 
     public void speakToFile(final DocumentController controller, final ResultResponse<String> info, int from, int to) {
@@ -1312,8 +1444,18 @@ public class TTSEngine {
      */
     private void registerRangeIndex(final String utteranceId, final String spokenText,
                                     final WordAlign align) {
+        registerRangeIndexRet(utteranceId, spokenText, align);
+    }
+
+    /**
+     * @return the registered index ({@code {char starts, flat word indices}})
+     * or null - the VoicePolish player uses it to fire ESTIMATED highlight
+     * positions when the engine reports no word ranges at all
+     */
+    private int[][] registerRangeIndexRet(final String utteranceId, final String spokenText,
+                                    final WordAlign align) {
         if (TxtUtils.isEmpty(spokenText)) {
-            return;
+            return null;
         }
         final java.util.List<Integer> starts = new java.util.ArrayList<Integer>();
         final java.util.List<Integer> flats = new java.util.ArrayList<Integer>();
@@ -1343,8 +1485,11 @@ public class TTSEngine {
             flats.add(flat);
         }
         if (!starts.isEmpty()) {
-            ttsRangeIndex.put(utteranceId, new int[][]{toIntArray(starts), toIntArray(flats)});
+            final int[][] idx = new int[][]{toIntArray(starts), toIntArray(flats)};
+            ttsRangeIndex.put(utteranceId, idx);
+            return idx;
         }
+        return null;
     }
 
     /**
@@ -1368,7 +1513,13 @@ public class TTSEngine {
                 hi = mid - 1;
             }
         }
-        return res < 0 ? -1 : flats[res];
+        final int flat = res < 0 ? -1 : flats[res];
+        if (flat >= 0) {
+            // a range event that actually marked a page word: the engine can
+            // drive the highlight - the word-by-word fallback is not needed
+            sysRangeSeen = true;
+        }
+        return flat;
     }
 
     /**
@@ -1392,6 +1543,13 @@ public class TTSEngine {
                 }
             }
             t.setPitch(effectiveSystemPitch());
+            // switching the voice re-arms the word-range probe: the new voice
+            // may report ranges even though the previous one never did
+            final String applied = want == null ? "" : want;
+            if (!applied.equals(lastAppliedVoice)) {
+                lastAppliedVoice = applied;
+                resetSystemRangeProbe();
+            }
         } catch (final Throwable e) {
             LOG.e(e);
         }

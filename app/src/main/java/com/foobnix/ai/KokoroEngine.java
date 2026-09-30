@@ -79,6 +79,33 @@ public class KokoroEngine {
         float[] weights;
     }
 
+    /** a fully synthesized clip: PCM plus the exact start frame of every IPA
+     *  unit recovered from the duration model (null when not recoverable) */
+    static class Clip {
+        final float[] pcm;
+        final long[] unitFrames;
+
+        Clip(final float[] pcm, final long[] unitFrames) {
+            this.pcm = pcm;
+            this.unitFrames = unitFrames;
+        }
+    }
+
+    /** collects the exact per-unit start frames while a clip is synthesized */
+    static class UnitTrace {
+        final java.util.List<Long> frames = new java.util.ArrayList<Long>();
+        /** set false when any subchunk's timing could not be recovered exactly */
+        volatile boolean exact = true;
+
+        long[] toArray() {
+            final long[] out = new long[frames.size()];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = frames.get(i);
+            }
+            return out;
+        }
+    }
+
     /** streaming synthesis sink: return 0 to abort (sherpa callback contract) */
     public interface SynthCallback {
         Integer invoke(float[] samples);
@@ -118,6 +145,20 @@ public class KokoroEngine {
      *  still killed us. 384 MB leaves a real margin after the load. Falling
      *  back to the system voice politely is always better than dying mid-read. */
     private static final long MIN_PREPARE_AVAIL_MEM = 384L * 1024 * 1024;
+    /** paragraph barriers stop waiting at this buffer lead instead of a full
+     *  drain: an AudioTrack that runs dry mid-page UNDERRUNS, and on many
+     *  devices the HAL then eats the first frames of the next clip - the
+     *  reported "the first word of every line is missing" (PDF pages turn
+     *  every visual line into its own paragraph). 300 ms of lead keeps the
+     *  sink fed across the barrier; only page-end/stop barriers still drain
+     *  to zero so the page flip lands exactly at the audio end. */
+    private static final long BARRIER_LEAD_FLOOR_MS = 300;
+    /** silence written into a freshly built track before the first clip: a
+     *  brand-new AudioTrack's first write can glitch the same way an underrun
+     *  does on some HALs - 80 ms of leading silence masks it (inaudible, and
+     *  word-highlight frames are captured after it, so nothing shifts) */
+    private static final int TRACK_PRIME_MS = 80;
+
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     /** Look-ahead synthesis: while the current clip is PLAYING, the next
@@ -135,8 +176,8 @@ public class KokoroEngine {
                     return t;
                 }
             });
-    private final java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<float[]>> prefetchFuts =
-            new java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<float[]>>();
+    private final java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<Clip>> prefetchFuts =
+            new java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<Clip>>();
     /** fires the per-word highlight events of sentence clips from the playhead */
     private final java.util.concurrent.ScheduledExecutorService highlightExec =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(new java.util.concurrent.ThreadFactory() {
@@ -312,7 +353,7 @@ public class KokoroEngine {
         generation++;
         aborted = true;
         queue.clear();
-        for (final java.util.concurrent.Future<float[]> f : prefetchFuts.values()) {
+        for (final java.util.concurrent.Future<Clip> f : prefetchFuts.values()) {
             f.cancel(false);
         }
         prefetchFuts.clear();
@@ -548,22 +589,22 @@ public class KokoroEngine {
             return; // nothing speakable queued or already scheduled
         }
         final Item tgt = target;
-        final java.util.concurrent.FutureTask<float[]> task =
-                new java.util.concurrent.FutureTask<float[]>(new java.util.concurrent.Callable<float[]>() {
-                    public float[] call() {
+        final java.util.concurrent.FutureTask<Clip> task =
+                new java.util.concurrent.FutureTask<Clip>(new java.util.concurrent.Callable<Clip>() {
+                    public Clip call() {
                         try {
                             if (aborted || myGen != generation) {
                                 return null;
                             }
                             android.util.Log.i(DIAG_TAG, "prefetch start: "
                                     + (tgt.text == null ? 0 : tgt.text.length()) + " chars");
-                            final float[] pcm = synthesizeToMemory(tgt.text, tgt.speed);
+                            final Clip clip = synthesizeToMemory(tgt.text, tgt.speed);
                             if (aborted || myGen != generation) {
                                 return null;
                             }
                             android.util.Log.i(DIAG_TAG, "prefetch done: "
-                                    + (pcm == null ? 0 : pcm.length) + " samples");
-                            return pcm;
+                                    + (clip == null || clip.pcm == null ? 0 : clip.pcm.length) + " samples");
+                            return clip;
                         } catch (Throwable t) {
                             LOG.e(t);
                             return null; // runItem falls back to live synthesis
@@ -582,8 +623,8 @@ public class KokoroEngine {
      * synthesis time the inline path would pay, but it STARTED earlier, so on
      * net the clip is ready sooner or instantly.
      */
-    private float[] takePrefetch(final Item it) {
-        final java.util.concurrent.Future<float[]> f = prefetchFuts.remove(it);
+    private Clip takePrefetch(final Item it) {
+        final java.util.concurrent.Future<Clip> f = prefetchFuts.remove(it);
         if (f == null) {
             return null;
         }
@@ -595,16 +636,17 @@ public class KokoroEngine {
     }
 
     /** synthesizes the WHOLE clip into memory (look-ahead prefetch) */
-    private float[] synthesizeToMemory(String text, float speed) throws Throwable {
+    private Clip synthesizeToMemory(String text, float speed) throws Throwable {
         final java.util.List<float[]> parts = new java.util.ArrayList<float[]>();
         final int[] total = new int[1];
+        final UnitTrace trace = new UnitTrace();
         generateStream(text, speed, new SynthCallback() {
             public Integer invoke(float[] samples) {
                 parts.add(samples);
                 total[0] += samples.length;
                 return aborted ? 0 : 1;
             }
-        });
+        }, trace);
         if (total[0] <= 0) {
             return null;
         }
@@ -614,7 +656,7 @@ public class KokoroEngine {
             System.arraycopy(p, 0, all, off, p.length);
             off += p.length;
         }
-        return all;
+        return new Clip(all, trace.exact ? trace.toArray() : null);
     }
 
     /** milliseconds of audio currently buffered ahead of the playhead */
@@ -640,6 +682,7 @@ public class KokoroEngine {
             at = buildTrack(sampleRate);
             writtenFrames.set(0);
             track = at;
+            primeTrack(at, sampleRate);
         }
         try {
             if (at.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
@@ -656,6 +699,7 @@ public class KokoroEngine {
                 final AudioTrack fresh = buildTrack(sampleRate);
                 writtenFrames.set(0);
                 track = fresh;
+                primeTrack(fresh, sampleRate);
                 fresh.play();
                 android.util.Log.i(DIAG_TAG, "audio track rebuilt after failure");
                 return fresh;
@@ -667,12 +711,48 @@ public class KokoroEngine {
     }
 
     /**
+     * Writes TRACK_PRIME_MS of silence into a brand-new track before the
+     * first clip: masks the first-write HAL glitch (same mechanism as the
+     * mid-page underrun that used to eat the first word of every line).
+     */
+    private void primeTrack(final AudioTrack at, final int sampleRate) {
+        try {
+            final int frames = sampleRate * TRACK_PRIME_MS / 1000;
+            final float[] zeros = new float[frames];
+            int off = 0;
+            while (off < frames) {
+                final int w = at.write(zeros, off, frames - off, AudioTrack.WRITE_NON_BLOCKING);
+                if (w <= 0) {
+                    break; // buffer full - the prime has done its job anyway
+                }
+                off += w;
+                writtenFrames.addAndGet(w);
+            }
+        } catch (Throwable e) {
+            LOG.e(e);
+        }
+    }
+
+    /**
      * Waits until the hardware has played everything written so far (or the
      * wait times out / the session is stopped / the sink proves head-less).
      * Used by barrier items so the page flip happens exactly when the audio
      * ends, not while seconds of speech are still buffered.
      */
     private void waitDrain(final AudioTrack at, final int sampleRate, final long myGen) {
+        waitDrainFloor(at, sampleRate, myGen, 0);
+    }
+
+    /**
+     * Paragraph barriers stop waiting at a small buffer lead instead of a
+     * full drain: a track that runs dry mid-page underruns and the next
+     * clip's first frames get eaten by the HAL on many devices ("the first
+     * word of every line is missing"). Keeping {@code floorMs} of audio
+     * stacked across the barrier keeps the sink fed and the clip starts
+     * intact; the page-end barrier still uses floor 0.
+     */
+    private void waitDrainFloor(final AudioTrack at, final int sampleRate, final long myGen,
+            final long floorMs) {
         if (at == null) {
             return;
         }
@@ -681,7 +761,7 @@ public class KokoroEngine {
         long lastMove = android.os.SystemClock.elapsedRealtime();
         while (!aborted && myGen == generation
                 && android.os.SystemClock.elapsedRealtime() < deadline) {
-            if (leadMs(at, sampleRate) <= 0) {
+            if (leadMs(at, sampleRate) <= floorMs) {
                 break;
             }
             final long now = android.os.SystemClock.elapsedRealtime();
@@ -771,35 +851,96 @@ public class KokoroEngine {
     }
 
     /**
+     * Maps IPA-unit start frames to the item's words. The frontend phonemizes
+     * word-by-word, so every word contributes a known number of units; when
+     * the counts sum up exactly, word k starts where its first unit starts.
+     * Returns null when the alignment is unreliable - the caller falls back to
+     * the character-weight estimator.
+     */
+    private long[] wordFramesFromUnits(final Item it, final long[] unitFrames) {
+        final InflectFrontend fe = frontend;
+        if (fe == null || unitFrames == null || unitFrames.length == 0
+                || it.words == null || it.words.length == 0) {
+            return null;
+        }
+        final long[] out = new long[it.words.length];
+        int u = 0;
+        for (int k = 0; k < it.words.length; k++) {
+            final String ph;
+            try {
+                ph = fe.phonemize(it.words[k] == null ? "" : it.words[k]);
+            } catch (Throwable t) {
+                return null;
+            }
+            final int cnt = ph == null ? 0 : countUnits(ph);
+            if (u + cnt > unitFrames.length) {
+                return null;
+            }
+            out[k] = cnt > 0 ? unitFrames[u] : -1; // a dropped word never highlights
+            u += cnt;
+        }
+        if (u != unitFrames.length) {
+            return null; // leftover units - alignment unreliable
+        }
+        return out;
+    }
+
+    /** number of space-separated IPA units in a phoneme string */
+    private static int countUnits(final String phonemes) {
+        int n = 0;
+        boolean in = false;
+        for (int i = 0; i < phonemes.length(); i++) {
+            if (phonemes.charAt(i) != ' ') {
+                if (!in) {
+                    n++;
+                    in = true;
+                }
+            } else {
+                in = false;
+            }
+        }
+        return n;
+    }
+
+    /**
      * Fires the per-word highlight events ("ttsW<flatIdx>") for one sentence
-     * clip. Word offsets are estimated from character weights inside the clip
-     * and mapped to playhead frames; a 50 ms ticker compares the hardware
-     * playhead with each word's frame and fires exactly when the user HEARS
-     * the word. On head-less sinks (emulator without audio) the playhead never
-     * moves - the remaining words are fired sequentially so the highlight
-     * chain stays observable and CI can assert it.
+     * clip. When {@code exact} word frames are available (recovered from the
+     * duration model) they are used directly; otherwise word offsets are
+     * estimated from character weights inside the clip. A 50 ms ticker
+     * compares the hardware playhead with each word's frame and fires exactly
+     * when the user HEARS the word. On head-less sinks (emulator without
+     * audio) the playhead never moves - the remaining words are fired
+     * sequentially so the highlight chain stays observable and CI can assert it.
      */
     private void scheduleWordHighlights(final AudioTrack at, final int sampleRate, final long myGen,
-            final Item it, final long startFrame, final long totalSamples) {
+            final Item it, final long startFrame, final long totalSamples, final long[] exact) {
         final int n = it.words.length;
         if (n == 0 || totalSamples <= 0) {
             return;
         }
-        float totalW = 0;
-        for (final float w : it.weights) {
-            totalW += w;
-        }
-        if (totalW <= 0) {
-            totalW = n;
-            for (int k = 0; k < n; k++) {
-                it.weights[k] = 1;
-            }
-        }
         final long[] frames = new long[n];
-        float cum = 0;
-        for (int k = 0; k < n; k++) {
-            cum += it.weights[k];
-            frames[k] = startFrame + (long) ((cum / totalW) * totalSamples);
+        if (exact != null) {
+            for (int k = 0; k < n; k++) {
+                frames[k] = startFrame + Math.max(0, exact[k]);
+            }
+            android.util.Log.i(DIAG_TAG, "highlight exact: " + n + " words");
+        } else {
+            android.util.Log.i(DIAG_TAG, "highlight estimated: " + n + " words");
+            float totalW = 0;
+            for (final float w : it.weights) {
+                totalW += w;
+            }
+            if (totalW <= 0) {
+                totalW = n;
+                for (int k = 0; k < n; k++) {
+                    it.weights[k] = 1;
+                }
+            }
+            float cum = 0;
+            for (int k = 0; k < n; k++) {
+                cum += it.weights[k];
+                frames[k] = startFrame + (long) ((cum / totalW) * totalSamples);
+            }
         }
         final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger(0);
         final long[] headState = {at.getPlaybackHeadPosition() & 0xFFFFFFFFL,
@@ -940,6 +1081,8 @@ public class KokoroEngine {
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 /** frame index of the clip's first sample, captured at first write */
                 final long[] itemStartFrame = new long[1];
+                /** exact per-IPA-unit start frames of this clip (null = estimator) */
+                final long[][] clipUnits = new long[1][];
                 final java.util.concurrent.atomic.AtomicBoolean startFired =
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 final HeadWatch watch = newHeadWatch(fAt);
@@ -1002,21 +1145,26 @@ public class KokoroEngine {
                             // the PREVIOUS one was playing - write the prefetched PCM
                             // through the same sink (start frame, highlights, pacing
                             // all identical); on a miss or failure synthesize live
-                            final float[] pre = takePrefetch(it);
-                            if (pre != null && pre.length > 0) {
+                            final Clip pre = takePrefetch(it);
+                            if (pre != null && pre.pcm != null && pre.pcm.length > 0) {
+                                clipUnits[0] = pre.unitFrames;
                                 int off = 0;
-                                while (off < pre.length && !aborted && myGen == generation) {
+                                while (off < pre.pcm.length && !aborted && myGen == generation) {
                                     headlessEscape(fAt, sampleRate, watch);
-                                    final int len = Math.min(4800, pre.length - off);
+                                    final int len = Math.min(4800, pre.pcm.length - off);
                                     final Integer r = sink.invoke(
-                                            java.util.Arrays.copyOfRange(pre, off, off + len));
+                                            java.util.Arrays.copyOfRange(pre.pcm, off, off + len));
                                     if (r == null || r == 0) {
                                         break;
                                     }
                                     off += len;
                                 }
                             } else {
-                                generateStream(it.text, it.speed, sink);
+                                final UnitTrace liveTrace = it.words == null ? null : new UnitTrace();
+                                generateStream(it.text, it.speed, sink, liveTrace);
+                                if (liveTrace != null && liveTrace.exact) {
+                                    clipUnits[0] = liveTrace.toArray();
+                                }
                             }
                         } catch (Throwable e) {
                             LOG.e(e);
@@ -1089,9 +1237,12 @@ public class KokoroEngine {
                             + String.format("%.2f", genSec / Math.max(audioSec, 0.01f)));
                 }
                 // schedule this sentence clip's word highlights: the ticker maps
-                // every word to a playhead frame and fires it when it is heard
+                // every word to a playhead frame and fires it when it is heard.
+                // Exact timing comes from the duration model whenever the IPA
+                // units align with the item's words - no more highlight drift
                 if (it.words != null && pcm[0] > 0) {
-                    scheduleWordHighlights(fAt, sampleRate, myGen, it, itemStartFrame[0], pcm[0]);
+                    final long[] exact = wordFramesFromUnits(it, clipUnits[0]);
+                    scheduleWordHighlights(fAt, sampleRate, myGen, it, itemStartFrame[0], pcm[0], exact);
                 }
                 // this clip's PCM is now fully written while the track keeps
                 // playing it for seconds - use the playback time to synthesize
@@ -1159,8 +1310,19 @@ public class KokoroEngine {
                     // barrier (0 ms): paragraph counter and the page flip must
                     // land when the audio actually ends, not while seconds of
                     // speech are still buffered - otherwise every page tail is
-                    // cut off by the next stopInternal()
-                    waitDrain(at, sampleRate, myGen);
+                    // cut off by the next stopInternal(). Page-end/stop barriers
+                    // drain to zero; PARAGRAPH barriers keep a 300 ms lead - a
+                    // track that runs dry mid-page underruns and the next
+                    // clip's first word gets eaten by the HAL (the reported
+                    // "the beginning of every line is not spoken" bug).
+                    final String uid = it.utteranceId;
+                    final boolean pageEndBarrier = uid == null || uid.equals(TTSEngine.UTTERANCE_ID_DONE)
+                            || uid.startsWith(TTSEngine.STOP_SIGNAL) || uid.equals("Temp");
+                    if (pageEndBarrier) {
+                        waitDrainFloor(at, sampleRate, myGen, 0);
+                    } else {
+                        waitDrainFloor(at, sampleRate, myGen, BARRIER_LEAD_FLOOR_MS);
+                    }
                 }
                 if (queue.isEmpty() && track != null && track.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
                     final AudioTrack dead = track;
@@ -1192,6 +1354,17 @@ public class KokoroEngine {
      * A callback return value of 0 aborts the rest of the text.
      */
     private void generateStream(String text, float speed, SynthCallback cb) throws Throwable {
+        generateStream(text, speed, cb, null);
+    }
+
+    /**
+     * @param trace when non-null, collects the EXACT start frame of every IPA
+     *              unit (space-separated phoneme group) within the clip - the
+     *              word-highlight playhead uses it instead of the character
+     *              weight estimate (which drifted over sentence pauses and
+     *              number expansions and made the highlight jump around)
+     */
+    private void generateStream(String text, float speed, SynthCallback cb, final UnitTrace trace) throws Throwable {
         InflectFrontend fe = frontend;
         OrtSession dur = durSession;
         OrtSession dec = decSession;
@@ -1204,10 +1377,7 @@ public class KokoroEngine {
         if (chunks.isEmpty()) {
             return;
         }
-        OrtSession.Result durRes = null;
-        OrtSession.Result decRes = null;
-        Map<String, OnnxTensor> durInputs = new LinkedHashMap<String, OnnxTensor>();
-        Map<String, OnnxTensor> decInputs = new LinkedHashMap<String, OnnxTensor>();
+        long clipBase = 0; // absolute frame offset of the current subchunk inside the clip
         try {
             for (int i = 0; i < chunks.size(); i++) {
                 if (aborted) {
@@ -1218,6 +1388,7 @@ public class KokoroEngine {
                     // boundary pause lives in the audio stream (plays as silence)
                     int pauseLen = Math.round(SAMPLE_RATE * InflectFrontend.boundaryPauseSec(chunks.get(i - 1)));
                     int written = writeZeros(cb, pauseLen);
+                    clipBase += Math.max(0, written);
                     if (written == 0 && aborted) {
                         return;
                     }
@@ -1252,15 +1423,16 @@ public class KokoroEngine {
                                 + " tokens=" + sids.length
                                 + " nativeHeap=" + (android.os.Debug.getNativeHeapAllocatedSize() >> 20) + "MB");
                     }
-                    boolean ok = synthesizeTokens(sids, i * 7 + s, lengthScale, dur, dec, cb);
-                    if (!ok) {
+                    final long wrote = synthesizeTokens(sids, i * 7 + s, lengthScale, dur, dec, cb,
+                            trace, part, clipBase);
+                    if (wrote < 0) {
                         return; // aborted or sink stopped
                     }
+                    clipBase += wrote;
                 }
             }
         } finally {
-            closeTensors(durInputs);
-            closeTensors(decInputs);
+            // (tensor maps are closed inside synthesizeTokens)
         }
     }
 
@@ -1270,10 +1442,11 @@ public class KokoroEngine {
      * strings can be synthesized in decode-sized pieces without nesting tensor
      * lifecycle management inside two loops.
      *
-     * @return false when the caller must stop (aborted or the sink closed)
+     * @return the number of samples streamed, or -1 when the caller must stop
+     *         (aborted or the sink closed)
      */
-    private boolean synthesizeTokens(long[] ids, int seed, float lengthScale, OrtSession dur, OrtSession dec,
-            SynthCallback cb) throws Throwable {
+    private long synthesizeTokens(long[] ids, int seed, float lengthScale, OrtSession dur, OrtSession dec,
+            SynthCallback cb, final UnitTrace trace, final String phonemePart, final long clipBase) throws Throwable {
         Map<String, OnnxTensor> durInputs = new LinkedHashMap<String, OnnxTensor>();
         Map<String, OnnxTensor> decInputs = new LinkedHashMap<String, OnnxTensor>();
         OrtSession.Result durRes = null;
@@ -1290,17 +1463,29 @@ public class KokoroEngine {
             OnnxTensor logsT = (OnnxTensor) durRes.get("logs_p_exp").orElse(null);
             OnnxTensor maskT = (OnnxTensor) durRes.get("y_mask").orElse(null);
             if (mT == null || logsT == null || maskT == null) {
-                return true; // nothing speakable in this piece - keep going
+                return 0; // nothing speakable in this piece - keep going
             }
             long[] mShape = mT.getInfo().getShape();
             float[] m = flat(mT);
             float[] logs = flat(logsT);
             float[] mask = flat(maskT);
             if (m == null) {
-                return true;
+                return 0;
             }
             android.util.Log.i(DIAG_TAG, "gen duration OK: T=" + (mShape.length > 2 ? mShape[2] : m.length)
                     + " nativeHeap=" + (android.os.Debug.getNativeHeapAllocatedSize() >> 20) + "MB");
+            if (trace != null) {
+                // EXACT per-unit start frames from the expanded duration
+                // features - the highlight playhead consumes them; a subchunk
+                // that cannot be recovered poisons the whole clip (estimator
+                // fallback), which is still better than a drifting highlight
+                final long[] tokStarts = tokenFrameStarts(m, mShape, ids.length);
+                if (tokStarts == null) {
+                    trace.exact = false;
+                } else {
+                    appendUnitFrames(trace, phonemePart, tokStarts, clipBase);
+                }
+            }
             // gaussian latent noise, seeded per piece (reference: seed + index)
             Random rng = new Random(1000L + seed);
             float[] noise = new float[m.length];
@@ -1318,29 +1503,29 @@ public class KokoroEngine {
                 decRes = dec.run(decInputs);
                 OnnxTensor wavT = (OnnxTensor) decRes.get("waveform").orElse(null);
                 if (wavT == null) {
-                    return true;
+                    return 0;
                 }
                 float[] wav = flat(wavT);
                 if (wav == null || wav.length == 0) {
-                    return true;
+                    return 0;
                 }
                 edgeFade(wav, SAMPLE_RATE, 5);
                 final int SLICE = 4800;
                 int off = 0;
                 while (off < wav.length) {
                     if (aborted) {
-                        return false;
+                        return -1;
                     }
                     int len = Math.min(SLICE, wav.length - off);
                     float[] slice = new float[len];
                     System.arraycopy(wav, off, slice, 0, len);
                     Integer r = cb.invoke(slice);
                     if (r == null || r == 0) {
-                        return false;
+                        return -1;
                     }
                     off += len;
                 }
-                return true;
+                return wav.length;
             } finally {
                 closeQuietly(decRes);
                 closeTensors(decInputs);
@@ -1348,6 +1533,82 @@ public class KokoroEngine {
         } finally {
             closeQuietly(durRes);
             closeTensors(durInputs);
+        }
+    }
+
+    /**
+     * Exact per-token frame starts recovered from the duration model's
+     * expanded features: m_p_exp repeats each input token's feature column
+     * for the token's predicted duration, and the VITS blank interleaving
+     * (x _ x _ ...) guarantees adjacent tokens differ, so every token
+     * boundary is visible as a column change. Returns null when the recovery
+     * is not exact (merged/extra segments) - the caller falls back to the
+     * character-weight estimator.
+     */
+    private static long[] tokenFrameStarts(final float[] m, final long[] mShape, final int tokenCount) {
+        if (mShape == null || mShape.length < 3 || tokenCount <= 0) {
+            return null;
+        }
+        final int D = (int) mShape[1];
+        final int T = (int) mShape[2];
+        if (D <= 0 || T <= 0 || m.length != D * (long) T) {
+            return null;
+        }
+        final long[] starts = new long[tokenCount];
+        int seg = 0;
+        for (int t = 1; t < T; t++) {
+            final int off = t * D;
+            boolean same = true;
+            for (int d = 0; d < D; d++) {
+                if (m[off + d] != m[off - D + d]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (!same) {
+                seg++;
+                if (seg >= tokenCount) {
+                    return null; // more segments than tokens - not a clean repeat
+                }
+                starts[seg] = t;
+            }
+        }
+        if (seg != tokenCount - 1) {
+            return null; // some token's segment vanished (zero duration) - inexact
+        }
+        return starts;
+    }
+
+    /**
+     * Appends the start frame of every IPA unit (space-separated phoneme
+     * group of one subchunk) to the trace. Phoneme-string char {@code c} maps
+     * to token {@code 2c+1} (toTokenIds interleaves a blank after every
+     * symbol and leaves a leading blank at token 0).
+     */
+    private static void appendUnitFrames(final UnitTrace trace, final String part,
+            final long[] tokStarts, final long clipBase) {
+        if (part == null || tokStarts == null) {
+            trace.exact = false;
+            return;
+        }
+        final int n = part.length();
+        int c = 0;
+        while (c < n) {
+            while (c < n && part.charAt(c) == ' ') {
+                c++;
+            }
+            if (c >= n) {
+                break;
+            }
+            final int tok = 2 * c + 1;
+            if (tok >= tokStarts.length) {
+                trace.exact = false;
+                return;
+            }
+            trace.frames.add(clipBase + tokStarts[tok]);
+            while (c < n && part.charAt(c) != ' ') {
+                c++;
+            }
         }
     }
 
