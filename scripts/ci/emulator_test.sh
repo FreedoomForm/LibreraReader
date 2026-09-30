@@ -181,6 +181,17 @@ else
   echo "::error::KOKORO SYNTHESIS MISSING - engine prepared but produced no audio"
   exit 1
 fi
+# ---------- look-ahead prefetch (gap-free reading, 7359) ----------
+# The engine synthesizes the NEXT queued clip into memory while the current
+# one plays; paragraph barriers must never expose synthesis latency as
+# silence. Informational here (head-less sinks drain unpredictably), the
+# hard gate stays on synthesis itself above.
+if grep -q "prefetch done" logcat-tts.txt; then
+  echo "LOOK-AHEAD PREFETCH CONFIRMED (gap-free reading active)"
+  grep -m 3 "prefetch" logcat-tts.txt || true
+else
+  echo "WARN: no prefetch events observed (synthesis outran the queue - not fatal)"
+fi
 # ---------- word-by-word highlight pipeline (service side, end to end) ----------
 # The service logs "tts words: captured=N" once per page (word boxes captured
 # from the page) and "tts word event: page=P idx=I" per spoken word matched to

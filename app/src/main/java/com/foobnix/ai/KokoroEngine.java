@@ -120,6 +120,23 @@ public class KokoroEngine {
     private static final long MIN_PREPARE_AVAIL_MEM = 384L * 1024 * 1024;
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
+    /** Look-ahead synthesis: while the current clip is PLAYING, the next
+     *  queued clip is synthesized into memory on this thread. Paragraph
+     *  barriers (waitDrain) then never turn the next clip's synthesis latency
+     *  into audible silence ("reads one line, waits 2-3 s, continues") - the
+     *  prefetched PCM starts writing the instant the barrier lifts. Only ONE
+     *  clip is ever in flight, so steady-state synthesis and playback never
+     *  overlap ONNX work (no doubled transient memory peaks). */
+    private final java.util.concurrent.ExecutorService prefetchExec =
+            java.util.concurrent.Executors.newSingleThreadExecutor(new java.util.concurrent.ThreadFactory() {
+                public Thread newThread(final Runnable r) {
+                    final Thread t = new Thread(r, "kokoro-prefetch");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
+    private final java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<float[]>> prefetchFuts =
+            new java.util.concurrent.ConcurrentHashMap<Item, java.util.concurrent.Future<float[]>>();
     /** fires the per-word highlight events of sentence clips from the playhead */
     private final java.util.concurrent.ScheduledExecutorService highlightExec =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(new java.util.concurrent.ThreadFactory() {
@@ -295,6 +312,10 @@ public class KokoroEngine {
         generation++;
         aborted = true;
         queue.clear();
+        for (final java.util.concurrent.Future<float[]> f : prefetchFuts.values()) {
+            f.cancel(false);
+        }
+        prefetchFuts.clear();
         AudioTrack t = track;
         track = null;
         if (t != null) {
@@ -502,6 +523,98 @@ public class KokoroEngine {
                 LOG.e(e);
             }
         }
+    }
+
+    /**
+     * Look-ahead: finds the first speakable item still queued for THIS
+     * generation and synthesizes it into memory on the prefetch thread. The
+     * result is joined by runItem when the playhead reaches the clip, so a
+     * paragraph barrier's waitDrain never exposes the synthesis latency as
+     * silence. Skipped when the engine is not ready or a newer generation
+     * (stop) is current.
+     */
+    private void schedulePrefetch(final long myGen) {
+        if (!ready || aborted || myGen != generation) {
+            return;
+        }
+        Item target = null;
+        for (final Item q : queue) {
+            if (q != null && q.isSpeak && q.gen == myGen) {
+                target = q;
+                break;
+            }
+        }
+        if (target == null || prefetchFuts.containsKey(target)) {
+            return; // nothing speakable queued or already scheduled
+        }
+        final Item tgt = target;
+        final java.util.concurrent.FutureTask<float[]> task =
+                new java.util.concurrent.FutureTask<float[]>(new java.util.concurrent.Callable<float[]>() {
+                    public float[] call() {
+                        try {
+                            if (aborted || myGen != generation) {
+                                return null;
+                            }
+                            android.util.Log.i(DIAG_TAG, "prefetch start: "
+                                    + (tgt.text == null ? 0 : tgt.text.length()) + " chars");
+                            final float[] pcm = synthesizeToMemory(tgt.text, tgt.speed);
+                            if (aborted || myGen != generation) {
+                                return null;
+                            }
+                            android.util.Log.i(DIAG_TAG, "prefetch done: "
+                                    + (pcm == null ? 0 : pcm.length) + " samples");
+                            return pcm;
+                        } catch (Throwable t) {
+                            LOG.e(t);
+                            return null; // runItem falls back to live synthesis
+                        }
+                    }
+                });
+        if (prefetchFuts.putIfAbsent(target, task) != null) {
+            return;
+        }
+        prefetchExec.execute(task);
+    }
+
+    /**
+     * Joins the look-ahead result for an item (null when none/failed). Blocks
+     * while the prefetch thread is still synthesizing - the wait equals the
+     * synthesis time the inline path would pay, but it STARTED earlier, so on
+     * net the clip is ready sooner or instantly.
+     */
+    private float[] takePrefetch(final Item it) {
+        final java.util.concurrent.Future<float[]> f = prefetchFuts.remove(it);
+        if (f == null) {
+            return null;
+        }
+        try {
+            return f.get();
+        } catch (Throwable e) {
+            return null; // cancelled or failed - synthesize inline
+        }
+    }
+
+    /** synthesizes the WHOLE clip into memory (look-ahead prefetch) */
+    private float[] synthesizeToMemory(String text, float speed) throws Throwable {
+        final java.util.List<float[]> parts = new java.util.ArrayList<float[]>();
+        final int[] total = new int[1];
+        generateStream(text, speed, new SynthCallback() {
+            public Integer invoke(float[] samples) {
+                parts.add(samples);
+                total[0] += samples.length;
+                return aborted ? 0 : 1;
+            }
+        });
+        if (total[0] <= 0) {
+            return null;
+        }
+        final float[] all = new float[total[0]];
+        int off = 0;
+        for (final float[] p : parts) {
+            System.arraycopy(p, 0, all, off, p.length);
+            off += p.length;
+        }
+        return all;
     }
 
     /** milliseconds of audio currently buffered ahead of the playhead */
@@ -831,60 +944,80 @@ public class KokoroEngine {
                         new java.util.concurrent.atomic.AtomicBoolean(false);
                 final HeadWatch watch = newHeadWatch(fAt);
                 final long genStart = android.os.SystemClock.elapsedRealtime();
+                final SynthCallback sink = new SynthCallback() {
+                    public Integer invoke(float[] samples) {
+                        if (aborted || myGen != generation) {
+                            return 0;
+                        }
+                        try {
+                            // frame index where this clip's audio starts in
+                            // the stream (word highlights are mapped from here)
+                            if (startFired.compareAndSet(false, true)) {
+                                itemStartFrame[0] = writtenFrames.get();
+                                if (it.words == null) {
+                                    // plain utterance: fire its start event
+                                    // delayed by whatever is still buffered
+                                    fireStartAt(it.utteranceId,
+                                            Math.min(leadMs(fAt, sampleRate), 1000), myGen, it.epoch);
+                                }
+                            }
+                            headlessEscape(fAt, sampleRate, watch);
+                            // NON_BLOCKING + retry loop: generation can
+                            // never wedge inside a blocking write on a
+                            // head-less sink (CI emulator), and the
+                            // escape/watchdog keep making progress
+                            int off = 0;
+                            while (off < samples.length) {
+                                if (aborted || myGen != generation) {
+                                    return 0;
+                                }
+                                final int w = fAt.write(samples, off, samples.length - off,
+                                        AudioTrack.WRITE_NON_BLOCKING);
+                                if (w > 0) {
+                                    off += w;
+                                    pcm[0] += w;
+                                    writtenFrames.addAndGet(w);
+                                    gotAudio.set(true);
+                                } else {
+                                    try {
+                                        Thread.sleep(20);
+                                    } catch (InterruptedException e) {
+                                        return 0;
+                                    }
+                                }
+                            }
+                        } catch (Throwable e) {
+                            return 0;
+                        }
+                        return 1;
+                    }
+                };
                 // Run the native synthesis on a DEDICATED thread: a stuck generate
                 // (espeak infinite loop on exotic text) must never block the shared
                 // executor - otherwise every later Play/preview stays silent forever.
                 final Thread genThread = new Thread(new Runnable() {
                     public void run() {
                         try {
-                            generateStream(it.text, it.speed, new SynthCallback() {
-                                public Integer invoke(float[] samples) {
-                                    if (aborted || myGen != generation) {
-                                        return 0;
+                            // a look-ahead job may have synthesized this clip while
+                            // the PREVIOUS one was playing - write the prefetched PCM
+                            // through the same sink (start frame, highlights, pacing
+                            // all identical); on a miss or failure synthesize live
+                            final float[] pre = takePrefetch(it);
+                            if (pre != null && pre.length > 0) {
+                                int off = 0;
+                                while (off < pre.length && !aborted && myGen == generation) {
+                                    headlessEscape(fAt, sampleRate, watch);
+                                    final int len = Math.min(4800, pre.length - off);
+                                    final Integer r = sink.invoke(
+                                            java.util.Arrays.copyOfRange(pre, off, off + len));
+                                    if (r == null || r == 0) {
+                                        break;
                                     }
-                                    try {
-                                        // frame index where this clip's audio starts in
-                                        // the stream (word highlights are mapped from here)
-                                        if (startFired.compareAndSet(false, true)) {
-                                            itemStartFrame[0] = writtenFrames.get();
-                                            if (it.words == null) {
-                                                // plain utterance: fire its start event
-                                                // delayed by whatever is still buffered
-                                                fireStartAt(it.utteranceId,
-                                                        Math.min(leadMs(fAt, sampleRate), 1000), myGen, it.epoch);
-                                            }
-                                        }
-                                        headlessEscape(fAt, sampleRate, watch);
-                                        // NON_BLOCKING + retry loop: generation can
-                                        // never wedge inside a blocking write on a
-                                        // head-less sink (CI emulator), and the
-                                        // escape/watchdog keep making progress
-                                        int off = 0;
-                                        while (off < samples.length) {
-                                            if (aborted || myGen != generation) {
-                                                return 0;
-                                            }
-                                            final int w = fAt.write(samples, off, samples.length - off,
-                                                    AudioTrack.WRITE_NON_BLOCKING);
-                                            if (w > 0) {
-                                                off += w;
-                                                pcm[0] += w;
-                                                writtenFrames.addAndGet(w);
-                                                gotAudio.set(true);
-                                            } else {
-                                                try {
-                                                    Thread.sleep(20);
-                                                } catch (InterruptedException e) {
-                                                    return 0;
-                                                }
-                                            }
-                                        }
-                                    } catch (Throwable e) {
-                                        return 0;
-                                    }
-                                    return 1;
+                                    off += len;
                                 }
-                            });
+                            } else {
+                                generateStream(it.text, it.speed, sink);
+                            }
                         } catch (Throwable e) {
                             LOG.e(e);
                         } finally {
@@ -960,6 +1093,10 @@ public class KokoroEngine {
                 if (it.words != null && pcm[0] > 0) {
                     scheduleWordHighlights(fAt, sampleRate, myGen, it, itemStartFrame[0], pcm[0]);
                 }
+                // this clip's PCM is now fully written while the track keeps
+                // playing it for seconds - use the playback time to synthesize
+                // the NEXT queued clip into memory (gap-free reading)
+                schedulePrefetch(myGen);
                 // keep the track playing for the next item; release it only when
                 // nothing else is queued and the tail has actually played out
                 if (queue.isEmpty()) {
@@ -996,6 +1133,9 @@ public class KokoroEngine {
                 aborted = false;
                 final long myGen = it.gen;
                 final int sampleRate = SAMPLE_RATE;
+                // the playhead may spend seconds here draining the buffered
+                // tail - use the time to synthesize the next clip into memory
+                schedulePrefetch(myGen);
                 AudioTrack at = track;
                 if (it.silenceMs > 0) {
                     // the pause must live in the AUDIO, not in a generation-thread

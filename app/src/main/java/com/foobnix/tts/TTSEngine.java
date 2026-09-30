@@ -346,6 +346,13 @@ public class TTSEngine {
         } catch (Exception e) {
             LOG.e(e);
         }
+        try {
+            // an enhanced session may still own the engine's progress listener
+            // and an AudioTrack - release both or the next plain session is deaf
+            com.foobnix.ai.ReuseVoicePlayer.get().stop();
+        } catch (Exception e) {
+            LOG.e(e);
+        }
         synchronized (helpObject) {
             if (ttsEngine != null) {
                 ttsEngine.shutdown();
@@ -609,6 +616,15 @@ public class TTSEngine {
         if (getTTS(null) == null) {
             return false;
         }
+        // the plain system path applies voice + pitch + rate right before it
+        // speaks; the enhanced path must do the same, otherwise speed/pitch and
+        // the picked system voice silently revert to engine defaults once the
+        // toggle is on ("voice enhancement does not work with the system TTS")
+        applyVoiceSettings();
+        if (AppState.get().ttsSpeed == 0.0f) {
+            AppState.get().ttsSpeed = 0.01f;
+        }
+        ttsEngine.setSpeechRate(AppState.get().ttsSpeed);
         final com.foobnix.ai.ReuseVoicePlayer reuse = com.foobnix.ai.ReuseVoicePlayer.get();
         if (AppState.get().ttsPauseDuration > 0 && text.contains(TxtUtils.TTS_PAUSE)) {
             String[] parts = text.split(TxtUtils.TTS_PAUSE);
@@ -688,6 +704,10 @@ public class TTSEngine {
             if (com.foobnix.ai.ReuseVoicePlayer.get().activate() && speakEnhancedLocked(text)) {
                 return;
             }
+            // the enhanced player replaced the engine's progress listener but
+            // did not end up owning playback - restore it, or the plain path's
+            // completion events would be swallowed and reading would stall
+            com.foobnix.ai.ReuseVoicePlayer.get().stop();
         }
         if (ttsEngine == null) {
             LOG.d("getTTS-status was null");
@@ -930,10 +950,17 @@ public class TTSEngine {
             return KokoroEngine.get().isBusy();
         }
         synchronized (helpObject) {
+            // enhanced (VoicePolish) playback: the engine itself is idle while
+            // the polished AudioTrack plays - the active player owns the
+            // session, so it must report "playing" or pause/stop controls and
+            // the notification misbehave
+            if (com.foobnix.ai.ReuseVoicePlayer.get().isActive()) {
+                return true;
+            }
             if (ttsEngine == null) {
                 return false;
             }
-            return ttsEngine != null && ttsEngine.isSpeaking();
+            return ttsEngine.isSpeaking();
         }
     }
 

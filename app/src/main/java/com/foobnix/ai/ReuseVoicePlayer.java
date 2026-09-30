@@ -19,7 +19,10 @@ import java.io.FileInputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -52,7 +55,7 @@ public class ReuseVoicePlayer {
         String utteranceId;
         boolean fireDoneAtEnd = true;
         // synthesis results
-        CountDownLatch synthLatch;
+        volatile CountDownLatch synthLatch;
         volatile boolean synthOk;
         volatile boolean aborted;
         // highlight ranges recorded during synthesis: [start, frame]
@@ -69,6 +72,24 @@ public class ReuseVoicePlayer {
     private volatile AudioTrack track;
     private volatile UtteranceProgressListener ownListener;
     private UtteranceProgressListener savedListener;
+    /** utterance id -> item of the synthesis currently in flight (the engine
+     *  reports progress from binder threads, where a ThreadLocal is useless:
+     *  the polled item is no longer in the queue, so without this map the
+     *  completion latch was never counted down and every paragraph stalled
+     *  for the full 30 s synthesis timeout - the "voice enhancement and the
+     *  system TTS do not work together" bug) */
+    private final ConcurrentHashMap<String, Item> inFlight = new ConcurrentHashMap<String, Item>();
+    /** look-ahead synthesis: the NEXT queued paragraph is synthesized while
+     *  the current one plays, killing the dead air between paragraphs */
+    private final ExecutorService synthExec = Executors.newSingleThreadExecutor(new java.util.concurrent.ThreadFactory() {
+        public Thread newThread(final Runnable r) {
+            final Thread t = new Thread(r, "reuse-synth");
+            t.setDaemon(true);
+            return t;
+        }
+    });
+    private final java.util.Set<Item> synthAhead =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Item, Boolean>());
 
     public boolean isActive() {
         return ownListener != null;
@@ -156,15 +177,17 @@ public class ReuseVoicePlayer {
     }
 
     private Item findByUtterance(String utteranceId) {
+        Item in = inFlight.get(utteranceId);
+        if (in != null) {
+            return in;
+        }
         for (Item it : queue) {
             if (it.utteranceId != null && it.utteranceId.equals(utteranceId)) {
                 return it;
             }
         }
-        return current.get();
+        return null;
     }
-
-    private final ThreadLocal<Item> current = new ThreadLocal<Item>();
 
     public void enqueue(String text, String utteranceId) {
         Item it = new Item();
@@ -186,6 +209,8 @@ public class ReuseVoicePlayer {
     public void stop() {
         generation.incrementAndGet();
         queue.clear();
+        synthAhead.clear();
+        inFlight.clear();
         AudioTrack t = track;
         track = null;
         if (t != null) {
@@ -253,66 +278,25 @@ public class ReuseVoicePlayer {
             fireDone(it.utteranceId);
             return;
         }
-
-        // ---- 1. synthesize to file ----
-        File wav = new File(LibreraApp.context.getCacheDir(),
-                "tts_enh_" + System.nanoTime() + ".wav");
-        it.synthLatch = new CountDownLatch(1);
-        current.set(it);
-        Bundle params = new Bundle();
-        try {
-            tts.synthesizeToFile(it.text, params, wav, it.utteranceId);
-        } catch (Throwable e) {
-            LOG.e(e);
-            current.set(null);
-            fireDone(it.utteranceId);
-            return;
-        }
-        try {
-            it.synthLatch.await(30, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-        }
-        current.set(null);
-        if (myGen != generation.get() || it.aborted) {
-            wav.delete();
-            return;
-        }
-        if (!it.synthOk || !wav.exists() || wav.length() < 44) {
-            wav.delete();
+        // warm the NEXT paragraph's synthesis while THIS one is about to play:
+        // the AudioTrack below runs for seconds - enough to synthesize the
+        // next clip in full, so no dead air is left between paragraphs
+        ensureSynthAhead(myGen);
+        if (!synthesized(it, myGen)) {
             // synthesis failed: keep the protocol alive
             fireDone(it.utteranceId);
             return;
         }
 
-        // ---- 2. decode + enhance ----
-        short[] pcm = decodeWav(wav);
-        wav.delete();
-        if (pcm == null || pcm.length == 0) {
-            fireDone(it.utteranceId);
-            return;
-        }
-        it.sampleRate = lastRate;
-        boolean enhanced = false;
-        if (AppState.get().ttsVoiceEnhance) {
-            // the audible polish chain (pure Java, no model): loudness + clarity
-            short[] before = pcm;
-            short[] after = VoicePolish.apply(pcm, it.sampleRate);
-            if (after != null && after != before && after.length > 0) {
-                pcm = after;
-                enhanced = true;
-            }
-        }
-        android.util.Log.i(KokoroEngine.DIAG_TAG, "tts utterance: samples=" + pcm.length
-                + " rate=" + it.sampleRate + " enhanced=" + enhanced);
-
         // ---- 3. play through AudioTrack ----
         fireStart(it.utteranceId);
-        playBlocking(pcm, it, myGen);
+        playBlocking(it.pcm, it, myGen);
         if (myGen != generation.get()) {
             return;
         }
         // the TTS pause between paragraphs is part of the playback flow here
-        if (AppState.get().ttsPauseDuration > 0) {
+        if (AppState.get().ttsPauseDuration > 0
+                && it.utteranceId.startsWith(TTSEngine.FINISHED_SIGNAL)) {
             try {
                 Thread.sleep(Math.min(5000, AppState.get().ttsPauseDuration));
             } catch (InterruptedException e) {
@@ -320,6 +304,135 @@ public class ReuseVoicePlayer {
         }
         // ---- 4. the service hears completion at the playback position ----
         fireDone(it.utteranceId);
+    }
+
+    /**
+     * Schedules the look-ahead synthesis of the first speakable item still
+     * queued (skips marker items). Runs on its own thread while the current
+     * item plays; {@link #synthesized} joins the result when the playhead
+     * reaches the clip.
+     */
+    private void ensureSynthAhead(final int myGen) {
+        for (final Item q : queue) {
+            if (q == null || q.text == null || q.text.length() == 0) {
+                continue; // marker
+            }
+            if (q.synthLatch != null || !synthAhead.add(q)) {
+                return; // already scheduled (latch set) or submission in flight
+            }
+            final Item target = q;
+            // the join handle MUST exist before this method returns - the drain
+            // thread reaches the item right after and must always see it
+            target.synthLatch = new CountDownLatch(1);
+            target.synthOk = false;
+            synthExec.execute(new Runnable() {
+                public void run() {
+                    try {
+                        synthAhead.remove(target);
+                        if (myGen != generation.get() || target.aborted
+                                || target.pcm != null) {
+                            return; // stopped, aborted or already synthesized
+                        }
+                        runSynth(target, myGen);
+                    } catch (Throwable t) {
+                        LOG.e(t);
+                        CountDownLatch l = target.synthLatch;
+                        if (l != null) {
+                            l.countDown();
+                        }
+                    }
+                }
+            });
+            return; // only the FIRST speakable item
+        }
+    }
+
+    /**
+     * Makes {@code it.pcm} available: joins a look-ahead job already running
+     * for this item, or synthesizes inline when no job was scheduled (first
+     * item of a page). Returns false on failure/stale - the caller fires the
+     * completion event so the service protocol keeps moving.
+     */
+    private boolean synthesized(Item it, int myGen) {
+        if (it.pcm != null && it.pcm.length > 0) {
+            return true; // look-ahead already delivered
+        }
+        if (it.synthLatch != null) {
+            // a look-ahead job is running for this item - wait for it
+            try {
+                it.synthLatch.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+            }
+            if (myGen != generation.get() || it.aborted) {
+                return false;
+            }
+            return it.synthOk && it.pcm != null && it.pcm.length > 0;
+        }
+        return runSynth(it, myGen);
+    }
+
+    /**
+     * Synthesizes one item to PCM (synthesizeToFile -> decode -> polish) and
+     * stores the result on the item. The engine reports completion through
+     * {@link #ownListener}, which is routed here via the utterance id.
+     */
+    private boolean runSynth(Item it, int myGen) {
+        TextToSpeech tts = TTSEngine.get().getTTS(null);
+        if (tts == null) {
+            return false;
+        }
+        // ---- 1. synthesize to file ----
+        File wav = new File(LibreraApp.context.getCacheDir(),
+                "tts_enh_" + System.nanoTime() + ".wav");
+        if (it.synthLatch == null) {
+            // inline path (first item of a page) - create the join handle here;
+            // the look-ahead path already set it at scheduling time
+            it.synthLatch = new CountDownLatch(1);
+        }
+        it.synthOk = false;
+        inFlight.put(it.utteranceId, it);
+        Bundle params = new Bundle();
+        try {
+            tts.synthesizeToFile(it.text, params, wav, it.utteranceId);
+        } catch (Throwable e) {
+            LOG.e(e);
+            inFlight.remove(it.utteranceId);
+            it.synthLatch.countDown();
+            return false;
+        }
+        try {
+            it.synthLatch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+        }
+        inFlight.remove(it.utteranceId);
+        if (myGen != generation.get() || it.aborted) {
+            wav.delete();
+            return false;
+        }
+        if (!it.synthOk || !wav.exists() || wav.length() < 44) {
+            wav.delete();
+            return false;
+        }
+
+        // ---- 2. decode + enhance ----
+        short[] pcm = decodeWav(wav);
+        wav.delete();
+        if (pcm == null || pcm.length == 0) {
+            return false;
+        }
+        it.sampleRate = lastRate;
+        if (AppState.get().ttsVoiceEnhance) {
+            // the audible polish chain (pure Java, no model): loudness + clarity
+            short[] before = pcm;
+            short[] after = VoicePolish.apply(pcm, it.sampleRate);
+            if (after != null && after != before && after.length > 0) {
+                pcm = after;
+            }
+        }
+        it.pcm = pcm;
+        android.util.Log.i(KokoroEngine.DIAG_TAG, "tts utterance: samples=" + pcm.length
+                + " rate=" + it.sampleRate);
+        return true;
     }
 
     private void playBlocking(short[] pcm, Item it, int myGen) {
@@ -394,7 +507,7 @@ public class ReuseVoicePlayer {
                 if (r[1] > head || r[1] < 0) {
                     continue;
                 }
-                String key = it.utteranceId + "@" + r[0];
+                String key = System.identityHashCode(it) + "/" + r[0];
                 if (firedRanges.contains(key)) {
                     continue;
                 }
