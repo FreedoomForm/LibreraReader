@@ -129,46 +129,14 @@ public class LibreraApp extends Application {
             LOG.e(t);
         }
 
-        try {
-            // Warm up the offline AI voice in the background so that pressing
-            // Play starts speaking immediately instead of waiting seconds for
-            // the model to initialize on the first playback. The engine holds
-            // ~135 MB resident (transient peaks to ~200 MB while decoding a
-            // chunk), so an eager warm-up at startup adds GC pressure on every
-            // UI interaction - buttons lag even when TTS is never opened. Warm
-            // up only after the UI has settled, skip low-RAM devices and let
-            // the memory guard inside KokoroEngine.prepareAsync refuse to load
-            // when the device is already tight (there the lazy path in
-            // TTSEngine falls back to the system voice instead of being
-            // LMK-killed with the whole reader).
-            final android.app.ActivityManager am =
-                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
-            boolean lowRamDevice = false;
-            if (am != null) {
-                android.app.ActivityManager.MemoryInfo mem = new android.app.ActivityManager.MemoryInfo();
-                am.getMemoryInfo(mem);
-                lowRamDevice = mem.totalMem < 4L * 1024 * 1024 * 1024;
-            }
-            if (AppState.get().ttsUseKokoro) {
-                if (lowRamDevice) {
-                    LOG.d("LibreraApp", "low-RAM device: Kokoro warm-up deferred to first TTS use");
-                } else {
-                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
-                        public void run() {
-                            try {
-                                if (AppState.get().ttsUseKokoro && !KokoroEngine.get().isReady()) {
-                                    KokoroEngine.get().prepareAsync(null, true);
-                                }
-                            } catch (Throwable t) {
-                                LOG.e(t);
-                            }
-                        }
-                    }, 15000);
-                }
-            }
-        } catch (Throwable t) {
-            LOG.e(t);
-        }
+        // NO startup warm-up of the AI voice anymore. The engine holds
+        // ~134 MB resident (transient peaks ~211 MB per decoded chunk) and
+        // pinning that from app start pushed every reader session into
+        // lowmemorykiller territory ("kicked to the main page" reports kept
+        // coming even after the 7356 memory fixes). The model is now loaded
+        // ONLY on the actual first Play (TTSEngine.kokoroSpeakLocked lazy
+        // prepareAsync with the 120s system-voice watchdog) or on an explicit
+        // voice preview - exactly like the Kokoro-7M era did it.
 
         try {
             if (AppsConfig.isShowAdsInApp(this)) {

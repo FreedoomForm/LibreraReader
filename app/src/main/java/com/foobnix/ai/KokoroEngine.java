@@ -110,11 +110,14 @@ public class KokoroEngine {
     private final java.util.concurrent.atomic.AtomicInteger zeroStreak =
             new java.util.concurrent.atomic.AtomicInteger(0);
     /** refuse to prepare below this free RAM: the engine needs ~135 MB steady
-     *  (~200 MB transient peak) and preparing it on a device that is already
-     *  tight - e.g. with a memory-heavy PDF open - got the whole process
-     *  LMK-killed (the "kicked back to the main page" bug). Falling back to
-     *  the system voice politely is always better than dying mid-read. */
-    private static final long MIN_PREPARE_AVAIL_MEM = 220L * 1024 * 1024;
+     *  (~211 MB transient peak per chunk - measured) and preparing it on a
+     *  device that is already tight - e.g. with a memory-heavy PDF open -
+     *  got the whole process LMK-killed (the "kicked back to the main page"
+     *  bug). 220 MB was measured to be too optimistic: passing the check at
+     *  230 MB free left only ~20 MB of headroom after init and the system
+     *  still killed us. 384 MB leaves a real margin after the load. Falling
+     *  back to the system voice politely is always better than dying mid-read. */
+    private static final long MIN_PREPARE_AVAIL_MEM = 384L * 1024 * 1024;
     private final ConcurrentLinkedQueue<Item> queue = new ConcurrentLinkedQueue<Item>();
     private final ExecutorService exec = Executors.newSingleThreadExecutor();
     /** fires the per-word highlight events of sentence clips from the playhead */
@@ -304,6 +307,7 @@ public class KokoroEngine {
     public void release() {
         stopInternal();
         ready = false;
+        cancelIdleRelease();
         OrtSession dur = durSession;
         OrtSession dec = decSession;
         durSession = null;
@@ -311,6 +315,47 @@ public class KokoroEngine {
         frontend = null;
         close(dur);
         close(dec);
+    }
+
+    /**
+     * The engine stays warm while a reading session is active, but 134 MB
+     * must not sit in the process forever after the user stopped listening -
+     * that resident block is lowmemorykiller bait while browsing big PDFs
+     * (the recurring "kicked to the main page" reports). 3 minutes without
+     * any playback activity releases the model; the next Play re-prepares
+     * lazily (a couple of seconds, once) - the same trade the Kokoro-7M
+     * era made, and stability beats a 2-second warm-up.
+     */
+    private static final long IDLE_RELEASE_DELAY_MS = 3L * 60 * 1000;
+    private final android.os.Handler idleHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable idleRelease = new Runnable() {
+        @Override public void run() {
+            try {
+                if (isBusy() || preparing) {
+                    // still working (or loading) - look again later
+                    idleHandler.postDelayed(this, IDLE_RELEASE_DELAY_MS);
+                    return;
+                }
+                if (isReady()) {
+                    android.util.Log.i(DIAG_TAG, "kokoro idle release: no playback for "
+                            + (IDLE_RELEASE_DELAY_MS / 1000) + "s, freeing the model");
+                    release();
+                }
+            } catch (Throwable t) {
+                LOG.e(t);
+            }
+        }
+    };
+
+    /** (re)starts the idle-release countdown; call on every playback activity */
+    private void scheduleIdleRelease() {
+        idleHandler.removeCallbacks(idleRelease);
+        idleHandler.postDelayed(idleRelease, IDLE_RELEASE_DELAY_MS);
+    }
+
+    private void cancelIdleRelease() {
+        idleHandler.removeCallbacks(idleRelease);
     }
 
     private static void close(OrtSession s) {
@@ -365,6 +410,8 @@ public class KokoroEngine {
         it.epoch = TTSEngine.get().getTTSWordEpoch();
         queue.add(it);
         ensureWorker();
+        // any playback activity pushes the idle-release countdown 3 min out
+        scheduleIdleRelease();
     }
 
     public void preview(final int sid) {

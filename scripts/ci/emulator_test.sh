@@ -314,4 +314,75 @@ else
   exit 1
 fi
 adb logcat -d | grep -m 5 "engine released on trim level\|KokoroDiag" || true
-echo "EMULATOR SMOKE TEST PASSED (PDF too): AI voice reads a PDF, process survives, trim drill OK"
+
+# ---------- 6. TTS DIALOG PHASE (the real 7356-7357 user repro) ----------
+# "I can't even open the TTS settings in a book - I'm kicked to the main
+# page." Since the Inflect migration (commit fcf5fca) OPENING the dialog
+# fired KokoroEngine.prepareAsync: ~134 MB resident (~211 MB peak) landed
+# on top of an open PDF and the lowmemorykiller killed the whole process.
+# The old Kokoro-7M era never loaded anything at dialog open.
+# Regression rule asserted here: the PDF is open, the trim drill above has
+# RELEASED the engine (so a fresh load would be visible), the AI voice is
+# ON -> tapping the TTS icon must open the dialog with ZERO "kokoro init"
+# lines in logcat and the process must stay alive.
+echo "Opening the in-book TTS dialog from the PDF screen (user repro)..."
+adb logcat -c || true
+adb shell uiautomator dump /sdcard/ui-ttsdlg.xml > /dev/null 2>&1 || true
+adb pull /sdcard/ui-ttsdlg.xml ui-ttsdlg.xml > /dev/null 2>&1 || true
+BOUNDS=$(grep -oE 'resource-id="[^"]*textToSpeach(Top)?"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-ttsdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
+if [ -n "$BOUNDS" ]; then
+  PAIR=$(echo "$BOUNDS" | sed 's/\]\[/ /; s/\[//; s/\]//')
+  X1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f1)
+  Y1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f2)
+  X2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f1)
+  Y2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f2)
+  TX=$(( (X1 + X2) / 2 ))
+  TY=$(( (Y1 + Y2) / 2 ))
+  echo "Tapping the TTS icon at ${TX},${TY}..."
+  adb shell input tap "$TX" "$TY" || true
+else
+  echo "TTS icon not in the dump - falling back to KEYCODE_T (reader shortcut)..."
+  adb shell input keyevent 48 || true
+fi
+sleep 12
+adb logcat -d > logcat-tts-dialog.txt || true
+DLG_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
+echo "PID after dialog open: $DLG_PID"
+if [ -z "$DLG_PID" ]; then
+  echo "::error::APP DIED WHILE OPENING THE TTS SETTINGS (the reported user bug!)"
+  grep -A 40 "FATAL EXCEPTION" logcat-tts-dialog.txt || true
+  grep -m 5 -i "fatal signal\|lowmemorykiller\|has died\|tombstone" logcat-tts-dialog.txt || true
+  exit 1
+fi
+# the dialog must actually be open (DragingPopup renders inside the main window)
+adb shell uiautomator dump /sdcard/ui-ttsdlg2.xml > /dev/null 2>&1 || true
+adb pull /sdcard/ui-ttsdlg2.xml ui-ttsdlg2.xml > /dev/null 2>&1 || true
+if grep -qE 'resource-id="[^"]*(ttsKokoroSwitch|ttsMainTab|ttsEngine)"' ui-ttsdlg2.xml 2>/dev/null; then
+  echo "TTS dialog is open (settings nodes visible)"
+else
+  echo "::error::TTS DIALOG DID NOT OPEN - the settings UI is not in the view hierarchy"
+  grep -o 'resource-id="[^"]\{1,60\}"' ui-ttsdlg2.xml 2>/dev/null | head -20 || true
+  exit 1
+fi
+DLG_INITS=$(grep -c "kokoro init" logcat-tts-dialog.txt || true)
+echo "Model loads triggered by the dialog open: $DLG_INITS"
+if [ "$DLG_INITS" != "0" ]; then
+  echo "::error::DIALOG OPEN TRIGGERED AN AI MODEL LOAD - the eager prepareAsync regression is back (LMK-kills real devices)"
+  grep -m 5 "kokoro init" logcat-tts-dialog.txt || true
+  exit 1
+fi
+DLG_FATALS=$(grep -c "FATAL EXCEPTION" logcat-tts-dialog.txt || true)
+if [ "$DLG_FATALS" != "0" ]; then
+  echo "::error::FATAL EXCEPTION while opening the TTS dialog"
+  grep -A 40 "FATAL EXCEPTION" logcat-tts-dialog.txt || true
+  exit 1
+fi
+adb shell input keyevent KEYCODE_BACK || true
+sleep 4
+if ! adb shell pidof "$PKG" > /dev/null; then
+  echo "::error::APP DIED AFTER CLOSING THE TTS DIALOG"
+  exit 1
+fi
+echo "TTS dialog opened and closed safely: no model load, process alive"
+
+echo "EMULATOR SMOKE TEST PASSED (PDF + TTS dialog too): AI voice reads a PDF, settings open without loading the model, process survives, trim drill OK"

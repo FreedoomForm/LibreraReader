@@ -896,10 +896,13 @@ public class DragingDialogs {
                 tintTtsSwitch(ttsKokoroSwitch);
                 ttsKokoroVoice.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 TxtUtils.underlineTextView(ttsKokoroVoice);
-                if (AppState.get().ttsUseKokoro) {
-                    // start loading the AI model now so Play/preview is instant
-                    KokoroEngine.get().prepareAsync(null, true);
-                }
+                // NO model load here. Opening the TTS settings must never
+                // allocate ~134 MB (peaks ~211 MB) on top of an open book:
+                // on real devices that instant load is exactly what got the
+                // whole process LMK-killed ("kicked to the main page when I
+                // open the TTS settings"). The old Kokoro-7M era never loaded
+                // anything at dialog open either - the model is prepared
+                // lazily by TTSEngine.kokoroSpeakLocked on the actual Play.
                 if (AppState.get().ttsUseKokoro) {
                     textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                 }
@@ -1061,7 +1064,10 @@ public class DragingDialogs {
                                         TTSEngine.get().stop();
                                         AppState.get().ttsUseKokoro = true;
                                         TTSEngine.kokoroFallbackActive = false;
-                                        KokoroEngine.get().prepareAsync(null, true);
+                                        // no eager model load here: the first Play
+                                        // prepares lazily (TTSEngine) - loading
+                                        // 134+ MB right in the dialog was LMK-killing
+                                        // the reader on real devices
                                         AppState.get().save(activity);
                                         textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                                         ttsKokoroSwitch.setChecked(true);
@@ -1337,7 +1343,7 @@ public class DragingDialogs {
                                             // built-in offline AI voice
                                             AppState.get().ttsUseKokoro = true;
                                             TTSEngine.kokoroFallbackActive = false;
-                                            KokoroEngine.get().prepareAsync(null, true);
+                                            // no eager model load: first Play prepares lazily
                                             textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
                                         } else {
                                             final String pkg = pkgs.get(which);
