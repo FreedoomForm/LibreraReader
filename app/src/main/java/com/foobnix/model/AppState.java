@@ -417,6 +417,10 @@ public class AppState {
     @Deprecated public volatile boolean ttsWordMode = false;
     // Highlight the word that is currently being spoken on the book page
     public volatile boolean ttsWordHighlight = true;
+    // Clean the page text right before speaking (TtsTextCleaner): expand
+    // abbreviations to full words, make numbers speech friendly and drop junk
+    // lines (page numbers, watermarks, urls). A local deterministic pipeline.
+    public volatile boolean ttsCleanText = true;
     @IgnoreHashCode public boolean isEnalbeTTSReplacements = true;
     public boolean isReferenceMode = false;
     public boolean isShowPageNumbers = false;

@@ -141,6 +141,18 @@
                 android:text="@string/tts_word_highlight_title" />
         </LinearLayout>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/ttsCleanTextSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/tts_clean_text_title" />
+        </LinearLayout>
+
         <com.foobnix.pdf.info.view.CustomSeek
             android:id="@+id/seekBarSpeed"
             android:layout_width="match_parent"

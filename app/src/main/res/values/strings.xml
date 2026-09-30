@@ -715,6 +715,7 @@
     <string name="tts_need_mic_permission">Grant microphone access and tap again</string>
     <string name="tts_delete_voices">Delete voices</string>
     <string name="tts_word_highlight_title">Highlight spoken word</string>
+    <string name="tts_clean_text_title">Clean text before reading (abbreviations, numbers, junk)</string>
     <string name="tts_word_highlight_on">Highlight spoken word: ON</string>
     <string name="tts_word_highlight_off">Highlight spoken word: OFF</string>
     <string name="tts_engine_title">Voice engine</string>

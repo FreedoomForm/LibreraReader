@@ -1091,6 +1091,13 @@ import java.util.List;
                 return;
             }
             String pageHTML = page.getPageHTML();
+            pageHTML = TxtUtils.replaceHTMLforTTS(pageHTML);
+            // Local smart cleanup (abbreviations -> full words, numbers fixed,
+            // junk lines dropped) runs BEFORE the word boxes are registered so
+            // the spoken text and the highlight boxes stay in sync
+            if (AppState.get().ttsCleanText) {
+                pageHTML = TtsTextCleaner.clean(pageHTML);
+            }
             // capture the page's word boxes BEFORE the page is recycled: the
             // word highlight maps the system voice's onRangeStart char offsets
             // against them (continuous reading)
@@ -1110,6 +1117,11 @@ import java.util.List;
                         }
                     }
                 }
+                // drop the boxes whose words the cleaner removed (junk lines):
+                // the sequential highlight matcher must never stall on them
+                if (AppState.get().ttsCleanText) {
+                    TtsTextCleaner.dropUnspokenWords(flat, pageHTML);
+                }
                 // the offset must count exactly what the word aligner will
                 // consume (punctuation-only tokens and TTS_PAUSE markers are
                 // skipped by the matcher) - a plain whitespace count drifts
@@ -1126,7 +1138,6 @@ import java.util.List;
                 TTSEngine.get().setTTSSourceWords(null, 0);
             }
             page.recycle();
-            pageHTML = TxtUtils.replaceHTMLforTTS(pageHTML);
 
             if (TxtUtils.isNotEmpty(anchor)) {
                 int indexOf = pageHTML.indexOf(anchor);

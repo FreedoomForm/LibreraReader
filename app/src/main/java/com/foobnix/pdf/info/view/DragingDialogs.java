@@ -937,6 +937,21 @@ public class DragingDialogs {
                     }
                 });
 
+                // ---- smart page-text cleanup switch (local, no models):
+                // abbreviations -> full words, numbers -> speech friendly
+                // text, junk lines (watermarks, page numbers) dropped ----
+
+                final androidx.appcompat.widget.SwitchCompat ttsCleanTextSwitch = view
+                        .findViewById(R.id.ttsCleanTextSwitch);
+                ttsCleanTextSwitch.setChecked(AppState.get().ttsCleanText);
+                tintTtsSwitch(ttsCleanTextSwitch);
+                ttsCleanTextSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                        AppState.get().ttsCleanText = isChecked;
+                        AppState.get().save(activity);
+                    }
+                });
+
 
                 final TextView timerTime = view.findViewById(R.id.timerTime);
 
@@ -2132,6 +2147,9 @@ public class DragingDialogs {
 
                         String text = editText.getText().toString().trim();
                         text = TxtUtils.replaceHTMLforTTS(text);
+                        if (AppState.get().ttsCleanText) {
+                            text = com.foobnix.tts.TtsTextCleaner.clean(text);
+                        }
                         text = text.replace(TxtUtils.TTS_PAUSE, "");
 
                         TTSEngine.get().speek(text);
@@ -2142,6 +2160,10 @@ public class DragingDialogs {
                     @Override public boolean onLongClick(View v) {
                         TTSEngine.get().stop();
                         String text = editText.getText().toString().trim();
+                        text = TxtUtils.replaceHTMLforTTS(text);
+                        if (AppState.get().ttsCleanText) {
+                            text = com.foobnix.tts.TtsTextCleaner.clean(text);
+                        }
                         TTSEngine.get().speek(text);
                         Toast.makeText(controller.getActivity(), text, Toast.LENGTH_SHORT).show();
                         return true;
