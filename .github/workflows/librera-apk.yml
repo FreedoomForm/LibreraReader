@@ -263,7 +263,12 @@ jobs:
           path: |
             logcat.txt
             logcat-tts.txt
+            logcat-tts-ru.txt
+            logcat-tts-pdf.txt
+            logcat-trim.txt
+            logcat-tts-dialog.txt
             ui-reader.xml
+            ui-ttsdlg2.xml
             ui.xml
           if-no-files-found: ignore
 

@@ -297,12 +297,15 @@ public class LibreraApp extends Application {
         // open that used to push the reader over the LMK line ("kicked to the
         // main page" bug). Released only while nothing is playing; the next
         // Play press re-initializes the engine in a couple of seconds.
+        // releaseAsync() frees ~134 MB of native state OFF the main thread:
+        // tearing the ORT sessions down on the UI thread froze the reader for
+        // seconds on slow devices and earned an ANR dialog on the emulator.
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
             try {
                 com.foobnix.ai.KokoroEngine k = com.foobnix.ai.KokoroEngine.get();
                 if (k.isReady() && !k.isBusy()) {
-                    k.release();
-                    android.util.Log.i("KokoroDiag", "engine released on trim level " + level);
+                    k.releaseAsync();
+                    android.util.Log.i("KokoroDiag", "engine release scheduled on trim level " + level);
                 }
             } catch (Throwable t) {
                 LOG.e(t);

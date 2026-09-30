@@ -46,6 +46,19 @@ AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -1)
 LAUNCHER=$("$AAPT" dump badging "$APK" | grep launchable-activity | sed -E "s/.*name='([^']+)'.*/\1/")
 echo "Package: $PKG  Launcher: $LAUNCHER"
 
+# one uiautomator dump with one retry; empty/stale result counts as failure
+dump_ui() { # dump_ui <filename>
+  for t in 1 2; do
+    adb shell uiautomator dump "/sdcard/$1" > /dev/null 2>&1 || true
+    adb pull "/sdcard/$1" "$1" > /dev/null 2>&1 || true
+    if [ -s "$1" ]; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
 # ---------- 1. Launch app ----------
 adb shell am start -W -n "$PKG/$LAUNCHER"
 sleep 40
@@ -70,6 +83,32 @@ adb shell uiautomator dump /sdcard/ui.xml || true
 adb pull /sdcard/ui.xml ui.xml || true
 if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
 
+# ---------- system-dialog recovery ----------
+# On slow CI boots the system LAUNCHER ANRs ("Input dispatching timed out")
+# and its modal Wait/Close dialog floats above EVERYTHING: it hijacks input
+# keyevents and every uiautomator dump (run 3 of the 7358 CI showed the
+# aerr_wait dialog instead of the reader for the whole rest of the run).
+# Tapping "Wait" dismisses it and keeps the ANRed app alive - exactly what
+# a human tester would do.
+dismiss_system_dialogs() {
+  for t in 1 2 3; do
+    dump_ui ui-sysdlg.xml || return 0
+    WB=$(grep -oE 'resource-id="android:id/aerr_wait"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-sysdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
+    if [ -z "$WB" ]; then
+      return 0 # no system error dialog on screen
+    fi
+    PAIR=$(echo "$WB" | sed 's/\]\[/ /; s/\[//; s/\]//')
+    WX1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f1)
+    WY1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f2)
+    WX2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f1)
+    WY2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f2)
+    echo "System (ANR) dialog detected - tapping Wait at $(( (WX1 + WX2) / 2 )),$(( (WY1 + WY2) / 2 ))..."
+    adb shell input tap $(( (WX1 + WX2) / 2 )) $(( (WY1 + WY2) / 2 )) || true
+    sleep 3
+  done
+}
+dismiss_system_dialogs || true
+
 # ---------- 1b. Open a real book (reader activity registers EventBus
 # subscribers; the word-highlight DRAW path lives there). Without this the
 # service posts MessageTTSWord into the void and CI cannot see the break
@@ -83,6 +122,7 @@ adb shell am start -a android.intent.action.VIEW \
   -t "application/epub+zip" || true
 sleep 25
 adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "ResumedActivity" || true
+dismiss_system_dialogs || true
 adb shell uiautomator dump /sdcard/ui-reader.xml || true
 adb pull /sdcard/ui-reader.xml ui-reader.xml || true
 if [ -f ui-reader.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui-reader.xml | head -8; fi
@@ -326,14 +366,16 @@ sleep 5
 echo "Sending RUNNING_CRITICAL trim to the app (memory-pressure drill)..."
 adb shell am send-trim-memory "$PDF_PID" RUNNING_CRITICAL 2>&1 || echo "(send-trim-memory not supported by this image - skipping the assert)"
 sleep 6
+adb logcat -d > logcat-trim.txt || true
 if adb shell pidof "$PKG" > /dev/null; then
-  TRIM_REL=$(grep -c "engine released on trim level" logcat-tts-pdf.txt || true)
+  TRIM_REL=$(grep -c "engine releas" logcat-trim.txt || true)
   echo "Process survived the trim drill; engine-release markers: $TRIM_REL"
+  grep -m 3 "engine releas" logcat-trim.txt || true
 else
   echo "::error::APP DIED DURING THE TRIM-MEMORY DRILL - memory release hook did not save it"
   exit 1
 fi
-adb logcat -d | grep -m 5 "engine released on trim level\|KokoroDiag" || true
+grep -m 5 "KokoroDiag" logcat-trim.txt || true
 
 # ---------- 6. TTS DIALOG PHASE (the real 7356-7357 user repro) ----------
 # "I can't even open the TTS settings in a book - I'm kicked to the main
@@ -352,18 +394,7 @@ adb logcat -d | grep -m 5 "engine released on trim level\|KokoroDiag" || true
 echo "Opening the in-book TTS dialog from the PDF screen (user repro)..."
 adb logcat -c || true
 
-dump_ui() { # dump_ui <filename> - one uiautomator dump with one retry
-  for t in 1 2; do
-    adb shell uiautomator dump "/sdcard/$1" > /dev/null 2>&1 || true
-    adb pull "/sdcard/$1" "$1" > /dev/null 2>&1 || true
-    if [ -s "$1" ]; then
-      return 0
-    fi
-    sleep 3
-  done
-  return 1
-}
-
+dismiss_system_dialogs || true
 BOUNDS=""
 if dump_ui ui-ttsdlg.xml; then
   BOUNDS=$(grep -oE 'resource-id="[^"]*textToSpeach(Top)?"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-ttsdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
@@ -400,7 +431,8 @@ verify_dialog_open() { # dump and look for the dialog's settings nodes
         return 0
       fi
     fi
-    sleep 3
+    dismiss_system_dialogs || true
+    sleep 2
   done
   return 1
 }

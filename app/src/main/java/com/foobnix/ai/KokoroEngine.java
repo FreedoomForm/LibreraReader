@@ -340,7 +340,7 @@ public class KokoroEngine {
                 if (isReady()) {
                     android.util.Log.i(DIAG_TAG, "kokoro idle release: no playback for "
                             + (IDLE_RELEASE_DELAY_MS / 1000) + "s, freeing the model");
-                    release();
+                    releaseAsync();
                 }
             } catch (Throwable t) {
                 LOG.e(t);
@@ -356,6 +356,27 @@ public class KokoroEngine {
 
     private void cancelIdleRelease() {
         idleHandler.removeCallbacks(idleRelease);
+    }
+
+    /**
+     * Frees the model OFF the caller thread. release() tears down ~134 MB of
+     * native session state; doing that on the main thread (onTrimMemory,
+     * idle timer) froze the UI for seconds on slow devices and earned the
+     * process an ANR dialog on the emulator. Serialized with the synthesis
+     * executor so it can never race a running drain()/prepare().
+     */
+    public void releaseAsync() {
+        exec.execute(new Runnable() {
+            public void run() {
+                try {
+                    if (isReady()) {
+                        release();
+                    }
+                } catch (Throwable t) {
+                    LOG.e(t);
+                }
+            }
+        });
     }
 
     private static void close(OrtSession s) {
