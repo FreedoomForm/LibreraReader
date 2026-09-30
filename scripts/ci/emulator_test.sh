@@ -303,6 +303,13 @@ if [ -z "${PDF_WORDS:-}" ] || [ "${PDF_WORDS:-0}" = "0" ]; then
   exit 1
 fi
 # ---------- low-memory drill: the 7356 trim hook must release the engine ----------
+# Stop the playback first: while the service reads, isBusy() keeps the engine
+# alive on purpose, so the trim would be a no-op; with idle UI the dump-based
+# phases below also stop fighting the word-highlight animation for uiautomator
+# idle state (dump silently fails on a constantly-redrawing window).
+echo "Stopping TTSService so the engine goes idle..."
+adb shell am stopservice -n "$PKG/com.foobnix.tts.TTSService" 2>&1 || true
+sleep 5
 echo "Sending RUNNING_CRITICAL trim to the app (memory-pressure drill)..."
 adb shell am send-trim-memory "$PDF_PID" RUNNING_CRITICAL 2>&1 || echo "(send-trim-memory not supported by this image - skipping the assert)"
 sleep 6
@@ -322,14 +329,32 @@ adb logcat -d | grep -m 5 "engine released on trim level\|KokoroDiag" || true
 # on top of an open PDF and the lowmemorykiller killed the whole process.
 # The old Kokoro-7M era never loaded anything at dialog open.
 # Regression rule asserted here: the PDF is open, the trim drill above has
-# RELEASED the engine (so a fresh load would be visible), the AI voice is
-# ON -> tapping the TTS icon must open the dialog with ZERO "kokoro init"
-# lines in logcat and the process must stay alive.
+# RELEASED the idle engine (so a fresh load would be visible), the AI voice
+# is ON -> opening the TTS dialog must show ZERO "kokoro init" lines in
+# logcat and the process must stay alive.
+# The UI is idle now (service stopped above), otherwise uiautomator dump
+# never reaches idle and every dump silently fails (that is exactly how the
+# first run of this phase red-herringed: dumps failed while the dialog was
+# actually open).
 echo "Opening the in-book TTS dialog from the PDF screen (user repro)..."
 adb logcat -c || true
-adb shell uiautomator dump /sdcard/ui-ttsdlg.xml > /dev/null 2>&1 || true
-adb pull /sdcard/ui-ttsdlg.xml ui-ttsdlg.xml > /dev/null 2>&1 || true
-BOUNDS=$(grep -oE 'resource-id="[^"]*textToSpeach(Top)?"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-ttsdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
+
+dump_ui() { # dump_ui <filename> - one uiautomator dump with one retry
+  for t in 1 2; do
+    adb shell uiautomator dump "/sdcard/$1" > /dev/null 2>&1 || true
+    adb pull "/sdcard/$1" "$1" > /dev/null 2>&1 || true
+    if [ -s "$1" ]; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+BOUNDS=""
+if dump_ui ui-ttsdlg.xml; then
+  BOUNDS=$(grep -oE 'resource-id="[^"]*textToSpeach(Top)?"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-ttsdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
+fi
 if [ -n "$BOUNDS" ]; then
   PAIR=$(echo "$BOUNDS" | sed 's/\]\[/ /; s/\[//; s/\]//')
   X1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f1)
@@ -341,7 +366,7 @@ if [ -n "$BOUNDS" ]; then
   echo "Tapping the TTS icon at ${TX},${TY}..."
   adb shell input tap "$TX" "$TY" || true
 else
-  echo "TTS icon not in the dump - falling back to KEYCODE_T (reader shortcut)..."
+  echo "TTS icon not in the dump (toolbars hidden?) - using KEYCODE_T (reader shortcut)..."
   adb shell input keyevent 48 || true
 fi
 sleep 12
@@ -354,16 +379,31 @@ if [ -z "$DLG_PID" ]; then
   grep -m 5 -i "fatal signal\|lowmemorykiller\|has died\|tombstone" logcat-tts-dialog.txt || true
   exit 1
 fi
-# the dialog must actually be open (DragingPopup renders inside the main window)
-adb shell uiautomator dump /sdcard/ui-ttsdlg2.xml > /dev/null 2>&1 || true
-adb pull /sdcard/ui-ttsdlg2.xml ui-ttsdlg2.xml > /dev/null 2>&1 || true
-if grep -qE 'resource-id="[^"]*(ttsKokoroSwitch|ttsMainTab|ttsEngine)"' ui-ttsdlg2.xml 2>/dev/null; then
-  echo "TTS dialog is open (settings nodes visible)"
-else
-  echo "::error::TTS DIALOG DID NOT OPEN - the settings UI is not in the view hierarchy"
-  grep -o 'resource-id="[^"]\{1,60\}"' ui-ttsdlg2.xml 2>/dev/null | head -20 || true
-  exit 1
+
+verify_dialog_open() { # dump and look for the dialog's settings nodes
+  for t in 1 2; do
+    if dump_ui ui-ttsdlg2.xml; then
+      if grep -qE 'resource-id="[^"]*(ttsKokoroSwitch|ttsMainTab|ttsEngine)"' ui-ttsdlg2.xml 2>/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+if ! verify_dialog_open; then
+  echo "Dialog not visible after the first opener - trying the KEYCODE_T route..."
+  adb shell input keyevent 48 || true
+  sleep 8
+  if ! verify_dialog_open; then
+    echo "::error::TTS DIALOG DID NOT OPEN - the settings UI is not in the view hierarchy"
+    grep -o 'resource-id="[^"]\{1,60\}"' ui-ttsdlg2.xml 2>/dev/null | head -20 || true
+    exit 1
+  fi
 fi
+echo "TTS dialog is open (settings nodes visible)"
+
 DLG_INITS=$(grep -c "kokoro init" logcat-tts-dialog.txt || true)
 echo "Model loads triggered by the dialog open: $DLG_INITS"
 if [ "$DLG_INITS" != "0" ]; then
