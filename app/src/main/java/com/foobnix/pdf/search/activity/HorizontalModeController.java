@@ -575,7 +575,7 @@ public abstract class HorizontalModeController extends DocumentController {
                           .putWords(page, one);
             EventBus.getDefault()
                     .post(new InvalidateMessage());
-            android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+            android.util.Log.i("TtsDiag",
                     "tts word DRAW horizontal: page=" + page + " idx=" + wordIndex + " rect=" + found);
         } catch (Throwable e) {
             LOG.e(e);

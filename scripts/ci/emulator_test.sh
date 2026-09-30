@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Librera AI - emulator smoke test (runs INSIDE android-emulator-runner).
+# Librera - emulator smoke test (runs INSIDE android-emulator-runner).
 # NOTE: the action executes `script:` line-by-line in separate shells,
 # so any multi-line logic with variables MUST live in this file instead.
 set -x
@@ -37,27 +37,17 @@ else
   exit 1
 fi
 
-# Raise the in-app synthesis kill-switch limits on emulators (TCG emulation is
-# slow); real devices keep the tight defaults (60s first audio / 30s stall).
-adb shell setprop kokoro.first_audio_ms 900000 || true
-adb shell setprop kokoro.stall_ms 600000 || true
+# The release APK must not carry the removed offline AI TTS anymore.
+if unzip -l "$APK" 2>/dev/null | grep -aqi "sherpa\|kokoro"; then
+  echo "::error::STALE AI TTS ENTRIES IN APK (sherpa/kokoro) - the cleanup regressed"
+  exit 1
+else
+  echo "NO AI TTS ENTRIES IN APK (system TTS only build)"
+fi
 
 AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -1)
 LAUNCHER=$("$AAPT" dump badging "$APK" | grep launchable-activity | sed -E "s/.*name='([^']+)'.*/\1/")
 echo "Package: $PKG  Launcher: $LAUNCHER"
-
-# one uiautomator dump with one retry; empty/stale result counts as failure
-dump_ui() { # dump_ui <filename>
-  for t in 1 2; do
-    adb shell uiautomator dump "/sdcard/$1" > /dev/null 2>&1 || true
-    adb pull "/sdcard/$1" "$1" > /dev/null 2>&1 || true
-    if [ -s "$1" ]; then
-      return 0
-    fi
-    sleep 3
-  done
-  return 1
-}
 
 # ---------- 1. Launch app ----------
 adb shell am start -W -n "$PKG/$LAUNCHER"
@@ -83,32 +73,6 @@ adb shell uiautomator dump /sdcard/ui.xml || true
 adb pull /sdcard/ui.xml ui.xml || true
 if [ -f ui.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui.xml | head -15; fi
 
-# ---------- system-dialog recovery ----------
-# On slow CI boots the system LAUNCHER ANRs ("Input dispatching timed out")
-# and its modal Wait/Close dialog floats above EVERYTHING: it hijacks input
-# keyevents and every uiautomator dump (run 3 of the 7358 CI showed the
-# aerr_wait dialog instead of the reader for the whole rest of the run).
-# Tapping "Wait" dismisses it and keeps the ANRed app alive - exactly what
-# a human tester would do.
-dismiss_system_dialogs() {
-  for t in 1 2 3; do
-    dump_ui ui-sysdlg.xml || return 0
-    WB=$(grep -oE 'resource-id="android:id/aerr_wait"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-sysdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
-    if [ -z "$WB" ]; then
-      return 0 # no system error dialog on screen
-    fi
-    PAIR=$(echo "$WB" | sed 's/\]\[/ /; s/\[//; s/\]//')
-    WX1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f1)
-    WY1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f2)
-    WX2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f1)
-    WY2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f2)
-    echo "System (ANR) dialog detected - tapping Wait at $(( (WX1 + WX2) / 2 )),$(( (WY1 + WY2) / 2 ))..."
-    adb shell input tap $(( (WX1 + WX2) / 2 )) $(( (WY1 + WY2) / 2 )) || true
-    sleep 3
-  done
-}
-dismiss_system_dialogs || true
-
 # ---------- 1b. Open a real book (reader activity registers EventBus
 # subscribers; the word-highlight DRAW path lives there). Without this the
 # service posts MessageTTSWord into the void and CI cannot see the break
@@ -122,16 +86,15 @@ adb shell am start -a android.intent.action.VIEW \
   -t "application/epub+zip" || true
 sleep 25
 adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "ResumedActivity" || true
-dismiss_system_dialogs || true
 adb shell uiautomator dump /sdcard/ui-reader.xml || true
 adb pull /sdcard/ui-reader.xml ui-reader.xml || true
 if [ -f ui-reader.xml ]; then grep -o 'text="[^"]\{1,40\}"' ui-reader.xml | head -8; fi
 
-# ---------- 2. TTS PLAYBACK TEST (Kokoro via TTSService) ----------
-printf 'Hello world. This is an offline text to speech test. Kokoro reads this sentence aloud on the emulator.' > ttsbook.txt
+# ---------- 2. TTS PLAYBACK TEST (system Google TTS via TTSService) ----------
+printf 'Hello world. This is an offline text to speech test. The system voice reads this sentence aloud on the emulator.' > ttsbook.txt
 adb shell mkdir -p /storage/emulated/0/Android/data/$PKG/files
             adb push ttsbook.txt /storage/emulated/0/Android/data/$PKG/files/librera_tts_test.txt
-echo "Starting TTSService (Kokoro) on the pushed text file..."
+echo "Starting TTSService (system TTS) on the pushed text file..."
 adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
   -a ACTION_PLAY_CURRENT_PAGE \
   --ei INT 0 \
@@ -162,53 +125,13 @@ if [ -z "$BACK_PID" ]; then
   echo "::error::APP KILLED AFTER BACK KEY DURING TTS"
   exit 1
 fi
-grep -m 5 "Kokoro\|TTSService\|keep-alive" logcat-tts.txt || true
-# Deterministic Kokoro check. run-as is NOT available for the release APK
-# (non-debuggable, Android 14 image denies it), so verify via logcat evidence:
-# the engine logs "model extracted to" on first unpack; run-as stays as a
-# fallback channel for debug builds.
-if grep -q "model extracted to" logcat-tts.txt \
-   || adb shell run-as com.foobnix.pdf.reader.ai test -f files/inflect/duration.onnx; then
-  echo "KOKORO MODEL EXTRACTED - offline AI engine path was used"
-else
-  echo "::error::KOKORO ENGINE NOT USED - model was never unpacked"
-  exit 1
-fi
-if grep -q "kokoro gen" logcat-tts.txt; then
-  echo "KOKORO SYNTHESIS CONFIRMED (RTF diagnostics present)"
-  grep -m 3 "kokoro gen" logcat-tts.txt || true
-else
-  echo "::error::KOKORO SYNTHESIS MISSING - engine prepared but produced no audio"
-  exit 1
-fi
-# ---------- look-ahead prefetch (gap-free reading, 7359) ----------
-# The engine synthesizes the NEXT queued clip into memory while the current
-# one plays; paragraph barriers must never expose synthesis latency as
-# silence. Informational here (head-less sinks drain unpredictably), the
-# hard gate stays on synthesis itself above.
-if grep -q "prefetch done" logcat-tts.txt; then
-  echo "LOOK-AHEAD PREFETCH CONFIRMED (gap-free reading active)"
-  grep -m 3 "prefetch" logcat-tts.txt || true
-else
-  echo "WARN: no prefetch events observed (synthesis outran the queue - not fatal)"
-fi
-# ---------- exact word timing from the duration model (7360) ----------
-# Word highlight frames now come from the expanded duration features
-# (m_p_exp column-repeat boundaries) whenever the IPA units align with the
-# item's word list; otherwise the character-weight estimator is used. Report
-# the split (informational - the end-to-end gate stays on the events below).
-EXACT=$(grep -c "highlight exact:" logcat-tts.txt || true)
-ESTIM=$(grep -c "highlight estimated:" logcat-tts.txt || true)
-echo "Word timing: exact=${EXACT:-0} estimated=${ESTIM:-0}"
-if [ "${EXACT:-0}" = "0" ] && [ "${ESTIM:-0}" = "0" ]; then
-  echo "WARN: no word-timing schedules observed - no sentence clips played?"
-fi
-PROBE=$(grep -m 1 "system TTS word-range probe:" logcat-tts.txt || true)
-echo "System-voice range probe: ${PROBE:-not observed (AI voice read the whole session)}"
-# ---------- word-by-word highlight pipeline (service side, end to end) ----------
+grep -m 5 "TTSService\|TextToSpeech" logcat-tts.txt || true
+
+# ---------- word highlight pipeline (service side, end to end) ----------
 # The service logs "tts words: captured=N" once per page (word boxes captured
 # from the page) and "tts word event: page=P idx=I" per spoken word matched to
-# a box. Both are always-on KokoroDiag lines - visible in release builds.
+# a box. Both are always-on TtsDiag lines - visible in release builds. The
+# system engine drives the events through UtteranceProgressListener.
 WORDS=$(grep -m 1 "tts words: captured=" logcat-tts.txt | sed -E 's/.*captured=([0-9]+).*/\1/')
 echo "Word boxes captured on the TTS page: ${WORDS:-none}"
 if [ -z "$WORDS" ]; then
@@ -243,314 +166,10 @@ if [ "${DRAW:-0}" = "0" ]; then
   echo "::error::NO WORD HIGHLIGHT DRAW - reader-side EventBus subscriber missing (R8 keep rules?)"
   exit 1
 fi
-KOK=$(grep -c "KokoroEngine" logcat-tts.txt || true)
-echo "KokoroEngine log lines (informational): $KOK"
-            ULE=$(grep -c "UnsatisfiedLinkError" logcat-tts.txt || true)
-            if [ "$ULE" != "0" ]; then
-              echo "::error::UnsatisfiedLinkError during TTS - native libs broken"
-              grep -m 3 -A 10 "UnsatisfiedLinkError" logcat-tts.txt
-              exit 1
-            fi
-            echo "EMULATOR SMOKE TEST PASSED: launch + Kokoro TTS playback + back-key survival"
-
-# ---------- 4. RUSSIAN TEXT PHASE (espeak-ng phonemization path) ----------
-# Real users read Cyrillic books: this text goes through the espeak phonemizer.
-# A native hang here used to poison the single-thread executor - every later
-# Play/preview stayed silent forever. Must synthesize or fail loudly.
-adb shell am force-stop "$PKG" || true
-sleep 3
-adb shell am start -W -n "$PKG/$LAUNCHER"
-sleep 20
-printf 'ÐÑÐ¸Ð²ÐµÑ Ð¼Ð¸Ñ. Ð­ÑÐ¾ ÑÐµÑÑ ÑÑÑÑÐºÐ¾Ð³Ð¾ ÑÐ·ÑÐºÐ°. Ð¡Ð¸Ð½ÑÐµÐ· ÑÐµÑÐ¸ Ð´Ð¾Ð»Ð¶ÐµÐ½ ÑÐ°Ð±Ð¾ÑÐ°ÑÑ Ð¸ Ñ ÐºÐ¸ÑÐ¸Ð»Ð»Ð¸ÑÐ¾Ð¹.' > ttsbook_ru.txt
-adb push ttsbook_ru.txt /storage/emulated/0/Android/data/$PKG/files/librera_tts_test_ru.txt || exit 1
-adb logcat -c || true
-adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
-  -a ACTION_PLAY_CURRENT_PAGE \
-  --ei INT 0 \
-  --es EXTRA_PATH /storage/emulated/0/Android/data/$PKG/files/librera_tts_test_ru.txt \
-  --ei EXTRA_W 1080 --ei EXTRA_H 2400 || true
-sleep ${RU_SLEEP:-150}
-adb logcat -d > logcat-tts-ru.txt || true
-RU_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-echo "RU phase PID: $RU_PID"
-if [ -z "$RU_PID" ]; then
-  echo "::error::APP DIED DURING RUSSIAN TTS"
-  grep -A 50 "FATAL EXCEPTION" logcat-tts-ru.txt || true
+ULE=$(grep -c "UnsatisfiedLinkError" logcat-tts.txt || true)
+if [ "$ULE" != "0" ]; then
+  echo "::error::UnsatisfiedLinkError during TTS - native libs broken"
+  grep -m 3 -A 10 "UnsatisfiedLinkError" logcat-tts.txt
   exit 1
 fi
-if grep -q "kokoro timeout\|kokoro failure" logcat-tts-ru.txt; then
-  echo "::error::KOKORO HANG/FAILURE REPRODUCED ON RUSSIAN TEXT"
-  grep -m 5 -B 2 -A 8 "kokoro timeout\|kokoro failure" logcat-tts-ru.txt || true
-  exit 1
-fi
-# The bundled Kokoro-7M-Distill is English-only: Russian text must be routed
-# to the system TTS (language guard logs "kokoro skip: non-English text").
-GUARD=$(grep -c "kokoro skip: non-English text" logcat-tts-ru.txt || true)
-echo "Language guard fired: $GUARD"
-RU_GEN=$(grep -c "kokoro gen" logcat-tts-ru.txt || true)
-echo "RU synthesis items: $RU_GEN"
-if [ "${STRICT_RU_ENGLISH_ONLY:-1}" == "1" ]; then
-  if [ "${GUARD:-0}" == "0" ]; then
-    echo "::error::LANGUAGE GUARD MISSING - Cyrillic text reached the English-only model"
-    grep -m 25 "KokoroEngine\|TTSService\|AI TTS\|KokoroDiag" logcat-tts-ru.txt || true
-    exit 1
-  fi
-  echo "OK: Russian text correctly routed to the system voice"
-else
-  if [ "$RU_GEN" == "0" ]; then
-    echo "WARN: no RU synthesis yet (slow TCG runner) - informational only"
-  fi
-fi
-echo "EMULATOR SMOKE TEST PASSED (RU too): Russian text synthesized without hangs"
-
-# ---------- 5. PDF PHASE (the reported user repro: AI voice on a PDF book) ----------
-# "Kicked to the main page when enabling the AI voice from a PDF" was never
-# covered: earlier phases used EPUB/TXT only. This phase opens a real PDF in
-# the reader (PDFium page rendering + page text extraction + word boxes),
-# plays it with the offline AI voice and asserts the process survives.
-# It also drills the low-memory path: send-trim-memory(RUNNING_CRITICAL) must
-# release the idle engine instead of letting the system kill the process.
-adb shell am force-stop "$PKG" || true
-sleep 3
-adb shell am start -W -n "$PKG/$LAUNCHER" || true
-sleep 15
-adb push scripts/assets/tts_sample.pdf /storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf || exit 1
-adb logcat -c || true
-echo "Opening the sample PDF in the reader (explicit component: the system"
-# "resolver would otherwise hijack the VIEW intent on images that ship
-# another application/pdf handler - the reader never opened and phase 5
-# silently degenerated into a service-only test"
-adb shell am start -n "$PKG/com.foobnix.OpenerActivity" \
-  -a android.intent.action.VIEW \
-  -d "file:///storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf" \
-  -t "application/pdf" || true
-sleep 25
-PDF_OPEN_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-if [ -z "$PDF_OPEN_PID" ]; then
-  echo "::error::APP DIED WHILE OPENING THE PDF"
-  adb logcat -d | grep -A 40 "FATAL EXCEPTION" || true
-  exit 1
-fi
-READER_FW=$(adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "topResumedActivity" || true)
-echo "Foreground after PDF open: $READER_FW"
-if ! echo "$READER_FW" | grep -q "ViewActivity"; then
-  echo "::error::READER IS NOT IN THE FOREGROUND AFTER OPENING THE PDF (resolver/library stole the intent) - the PDF UI repro is not covered without this"
-  adb shell uiautomator dump /sdcard/ui-pdf.xml > /dev/null 2>&1 || true
-  adb pull /sdcard/ui-pdf.xml ui-pdf.xml > /dev/null 2>&1 || true
-  grep -o 'resource-id="[^"]\{1,60\}"' ui-pdf.xml 2>/dev/null | head -20 || true
-  exit 1
-fi
-echo "PDF open, PID=$PDF_OPEN_PID - starting AI TTS on it..."
-adb shell am start-foreground-service -n "$PKG/com.foobnix.tts.TTSService" \
-  -a ACTION_PLAY_CURRENT_PAGE \
-  --ei INT 0 \
-  --es EXTRA_PATH /storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf \
-  --ei EXTRA_W 1080 --ei EXTRA_H 2400 || true
-sleep ${PDF_SLEEP:-140}
-adb logcat -d > logcat-tts-pdf.txt || true
-PDF_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-echo "PID after PDF TTS: $PDF_PID"
-# Known platform issue: the x86_64 ANDROID build of libonnxruntime
-# (1.20.0 AND 1.30.0 - both verified) dies with SIGSEGV inside
-# OrtSession.run after ~2.5 minutes of continuous synthesis WHILE the
-# PDF reader (PDFium re-render on every word highlight) is up. The same
-# pipeline runs clean: (a) without the reader, (b) on desktop ORT in a
-# python harness, (c) with a stable native heap (no leak - logged).
-# It is an engine/platform bug, tracked separately; do NOT let it mask
-# real regressions: a death WITHOUT that native crash still fails CI.
-# 7359: the look-ahead prefetch synthesizes on its own thread, so the
-# crash may surface as thread "kokoro-prefetch" instead of "kokoro-gen".
-known_ort_crash_present() {
-  adb logcat -d | grep -qE "Fatal signal 11 \(SIGSEGV\).*kokoro-(gen|prefetch)"
-}
-
-recover_from_known_ort_crash() {
-  echo "WARN: known x86_64 ORT native crash reproduced (kokoro-gen/prefetch SIGSEGV) - continuing on a fresh process"
-  adb shell am force-stop "$PKG" || true
-  sleep 3
-  adb shell am start -W -n "$PKG/$LAUNCHER" || true
-  sleep 15
-  adb shell am start -n "$PKG/com.foobnix.OpenerActivity" \
-    -a android.intent.action.VIEW \
-    -d "file:///storage/emulated/0/Android/data/$PKG/files/tts_sample.pdf" \
-    -t "application/pdf" || true
-  sleep 20
-  PDF_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-  if [ -z "$PDF_PID" ]; then
-    echo "::error::APP DID NOT RESTART AFTER THE KNOWN ORT CRASH"
-    exit 1
-  fi
-  FW2=$(adb shell dumpsys activity activities 2>/dev/null | grep -m1 -i "topResumedActivity" || true)
-  if ! echo "$FW2" | grep -q "ViewActivity"; then
-    echo "::error::READER NOT FOREGROUND AFTER RESTART"
-    exit 1
-  fi
-}
-
-if [ -z "$PDF_PID" ]; then
-  if known_ort_crash_present; then
-    recover_from_known_ort_crash
-  else
-    echo "::error::APP DIED DURING PDF TTS PLAYBACK (no known native crash signature - a REAL regression!)"
-    grep -A 50 "FATAL EXCEPTION" logcat-tts-pdf.txt || true
-    grep -m 5 -i "lowmemorykiller\|has died\|tombstone" logcat-tts-pdf.txt || true
-    exit 1
-  fi
-fi
-# The known crash can also land between the pidof check above and the trim
-# drill below (crash-dump teardown keeps the pid visible for seconds).
-PDF_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-if [ -z "$PDF_PID" ]; then
-  if known_ort_crash_present; then
-    recover_from_known_ort_crash
-  else
-    echo "::error::APP DIED AFTER PDF TTS PLAYBACK (no known native crash signature - a REAL regression!)"
-    exit 1
-  fi
-fi
-PDF_FATALS=$(grep -c "FATAL EXCEPTION" logcat-tts-pdf.txt || true)
-if [ "$PDF_FATALS" != "0" ]; then
-  echo "::error::FATAL EXCEPTION during PDF TTS playback"
-  grep -A 50 "FATAL EXCEPTION" logcat-tts-pdf.txt || true
-  exit 1
-fi
-PDF_SIGS=$(grep -c "Fatal signal" logcat-tts-pdf.txt || true)
-if [ "$PDF_SIGS" != "0" ]; then
-  # the kokoro-gen SIGSEGV inside libonnxruntime is the known x86_64
-  # platform issue handled above (restart + continue); ANY other native
-  # crash in the app process is a real regression and fails here
-  KNOWN=$(grep -cE "Fatal signal 11 \(SIGSEGV\).*kokoro-(gen|prefetch)" logcat-tts-pdf.txt || true)
-  if [ "$PDF_SIGS" != "$KNOWN" ]; then
-    echo "::error::UNEXPECTED NATIVE CRASH (Fatal signal) during PDF TTS playback"
-    grep -m 3 -A 15 "Fatal signal" logcat-tts-pdf.txt || true
-    exit 1
-  fi
-  echo "Only the known kokoro-gen/prefetch ORT SIGSEGV present ($KNOWN) - acknowledged"
-fi
-if ! grep -q "kokoro gen" logcat-tts-pdf.txt; then
-  echo "::error::KOKORO SYNTHESIS MISSING ON PDF - engine prepared but no audio"
-  grep -m 10 "KokoroDiag\|KokoroEngine" logcat-tts-pdf.txt || true
-  exit 1
-fi
-PDF_WORDS=$(grep -m 1 "tts words: captured=" logcat-tts-pdf.txt | sed -E 's/.*captured=([0-9]+).*/\1/')
-echo "PDF word boxes captured: ${PDF_WORDS:-none}"
-if [ -z "${PDF_WORDS:-}" ] || [ "${PDF_WORDS:-0}" = "0" ]; then
-  echo "::error::PDF PAGE TEXT EMPTY - PDFium text extraction returned no words"
-  exit 1
-fi
-# ---------- low-memory drill: the 7356 trim hook must release the engine ----------
-# Stop the playback first: while the service reads, isBusy() keeps the engine
-# alive on purpose, so the trim would be a no-op; with idle UI the dump-based
-# phases below also stop fighting the word-highlight animation for uiautomator
-# idle state (dump silently fails on a constantly-redrawing window).
-echo "Stopping TTSService so the engine goes idle..."
-adb shell am stopservice -n "$PKG/com.foobnix.tts.TTSService" 2>&1 || true
-sleep 5
-echo "Sending RUNNING_CRITICAL trim to the app (memory-pressure drill)..."
-adb shell am send-trim-memory "$PDF_PID" RUNNING_CRITICAL 2>&1 || echo "(send-trim-memory not supported by this image - skipping the assert)"
-sleep 6
-adb logcat -d > logcat-trim.txt || true
-if adb shell pidof "$PKG" > /dev/null; then
-  TRIM_REL=$(grep -c "engine releas" logcat-trim.txt || true)
-  echo "Process survived the trim drill; engine-release markers: $TRIM_REL"
-  grep -m 3 "engine releas" logcat-trim.txt || true
-else
-  echo "::error::APP DIED DURING THE TRIM-MEMORY DRILL - memory release hook did not save it"
-  exit 1
-fi
-grep -m 5 "KokoroDiag" logcat-trim.txt || true
-
-# ---------- 6. TTS DIALOG PHASE (the real 7356-7357 user repro) ----------
-# "I can't even open the TTS settings in a book - I'm kicked to the main
-# page." Since the Inflect migration (commit fcf5fca) OPENING the dialog
-# fired KokoroEngine.prepareAsync: ~134 MB resident (~211 MB peak) landed
-# on top of an open PDF and the lowmemorykiller killed the whole process.
-# The old Kokoro-7M era never loaded anything at dialog open.
-# Regression rule asserted here: the PDF is open, the trim drill above has
-# RELEASED the idle engine (so a fresh load would be visible), the AI voice
-# is ON -> opening the TTS dialog must show ZERO "kokoro init" lines in
-# logcat and the process must stay alive.
-# The UI is idle now (service stopped above), otherwise uiautomator dump
-# never reaches idle and every dump silently fails (that is exactly how the
-# first run of this phase red-herringed: dumps failed while the dialog was
-# actually open).
-echo "Opening the in-book TTS dialog from the PDF screen (user repro)..."
-adb logcat -c || true
-
-dismiss_system_dialogs || true
-BOUNDS=""
-if dump_ui ui-ttsdlg.xml; then
-  BOUNDS=$(grep -oE 'resource-id="[^"]*textToSpeach(Top)?"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' ui-ttsdlg.xml 2>/dev/null | grep -oE 'bounds="[^"]*"' | head -1 | sed 's/bounds="//;s/"//')
-fi
-if [ -n "$BOUNDS" ]; then
-  PAIR=$(echo "$BOUNDS" | sed 's/\]\[/ /; s/\[//; s/\]//')
-  X1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f1)
-  Y1=$(echo "$PAIR" | cut -d' ' -f1 | cut -d',' -f2)
-  X2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f1)
-  Y2=$(echo "$PAIR" | cut -d' ' -f2 | cut -d',' -f2)
-  TX=$(( (X1 + X2) / 2 ))
-  TY=$(( (Y1 + Y2) / 2 ))
-  echo "Tapping the TTS icon at ${TX},${TY}..."
-  adb shell input tap "$TX" "$TY" || true
-else
-  echo "TTS icon not in the dump (toolbars hidden?) - using KEYCODE_T (reader shortcut)..."
-  adb shell input keyevent 48 || true
-fi
-sleep 12
-adb logcat -d > logcat-tts-dialog.txt || true
-DLG_PID=$(adb shell pidof "$PKG" | tr -d '\r\n ')
-echo "PID after dialog open: $DLG_PID"
-if [ -z "$DLG_PID" ]; then
-  echo "::error::APP DIED WHILE OPENING THE TTS SETTINGS (the reported user bug!)"
-  grep -A 40 "FATAL EXCEPTION" logcat-tts-dialog.txt || true
-  grep -m 5 -i "fatal signal\|lowmemorykiller\|has died\|tombstone" logcat-tts-dialog.txt || true
-  exit 1
-fi
-
-verify_dialog_open() { # dump and look for the dialog's settings nodes
-  for t in 1 2; do
-    if dump_ui ui-ttsdlg2.xml; then
-      if grep -qE 'resource-id="[^"]*(ttsKokoroSwitch|ttsMainTab|ttsEngine)"' ui-ttsdlg2.xml 2>/dev/null; then
-        return 0
-      fi
-    fi
-    dismiss_system_dialogs || true
-    sleep 2
-  done
-  return 1
-}
-
-if ! verify_dialog_open; then
-  echo "Dialog not visible after the first opener - trying the KEYCODE_T route..."
-  adb shell input keyevent 48 || true
-  sleep 8
-  if ! verify_dialog_open; then
-    echo "::error::TTS DIALOG DID NOT OPEN - the settings UI is not in the view hierarchy"
-    grep -o 'resource-id="[^"]\{1,60\}"' ui-ttsdlg2.xml 2>/dev/null | head -20 || true
-    exit 1
-  fi
-fi
-echo "TTS dialog is open (settings nodes visible)"
-
-DLG_INITS=$(grep -c "kokoro init" logcat-tts-dialog.txt || true)
-echo "Model loads triggered by the dialog open: $DLG_INITS"
-if [ "$DLG_INITS" != "0" ]; then
-  echo "::error::DIALOG OPEN TRIGGERED AN AI MODEL LOAD - the eager prepareAsync regression is back (LMK-kills real devices)"
-  grep -m 5 "kokoro init" logcat-tts-dialog.txt || true
-  exit 1
-fi
-DLG_FATALS=$(grep -c "FATAL EXCEPTION" logcat-tts-dialog.txt || true)
-if [ "$DLG_FATALS" != "0" ]; then
-  echo "::error::FATAL EXCEPTION while opening the TTS dialog"
-  grep -A 40 "FATAL EXCEPTION" logcat-tts-dialog.txt || true
-  exit 1
-fi
-adb shell input keyevent KEYCODE_BACK || true
-sleep 4
-if ! adb shell pidof "$PKG" > /dev/null; then
-  echo "::error::APP DIED AFTER CLOSING THE TTS DIALOG"
-  exit 1
-fi
-echo "TTS dialog opened and closed safely: no model load, process alive"
-
-echo "EMULATOR SMOKE TEST PASSED (PDF + TTS dialog too): AI voice reads a PDF, settings open without loading the model, process survives, trim drill OK"
+echo "EMULATOR SMOKE TEST PASSED: launch + system TTS playback + word highlight + back-key survival"

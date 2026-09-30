@@ -147,8 +147,6 @@ import com.foobnix.pdf.search.menu.MenuBuilderM;
 import com.foobnix.pdf.search.view.ProgressTask;
 import com.foobnix.sys.TempHolder;
 import com.foobnix.tts.TTSControlsView;
-import com.foobnix.ai.KokoroEngine;
-import com.foobnix.ai.KokoroVoices;
 import com.foobnix.tts.TTSEngine;
 import com.foobnix.tts.TTSService;
 import com.foobnix.tts.TTSTracks;
@@ -889,41 +887,6 @@ public class DragingDialogs {
                 final TextView ttsPage = view.findViewById(R.id.ttsPage);
 
                 final TextView textEngine = view.findViewById(R.id.ttsEngine);
-                final androidx.appcompat.widget.SwitchCompat ttsKokoroSwitch = view
-                        .findViewById(R.id.ttsKokoroSwitch);
-                final TextView ttsKokoroVoice = view.findViewById(R.id.ttsKokoroVoice);
-                ttsKokoroSwitch.setChecked(AppState.get().ttsUseKokoro);
-                tintTtsSwitch(ttsKokoroSwitch);
-                ttsKokoroVoice.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                TxtUtils.underlineTextView(ttsKokoroVoice);
-                // NO model load here. Opening the TTS settings must never
-                // allocate ~134 MB (peaks ~211 MB) on top of an open book:
-                // on real devices that instant load is exactly what got the
-                // whole process LMK-killed ("kicked to the main page when I
-                // open the TTS settings"). The old Kokoro-7M era never loaded
-                // anything at dialog open either - the model is prepared
-                // lazily by TTSEngine.kokoroSpeakLocked on the actual Play.
-                if (AppState.get().ttsUseKokoro) {
-                    textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                }
-                ttsKokoroSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
-                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
-                        try {
-                            if (isChecked) {
-                                // the user turns the AI voice back ON - clear the failure fallback
-                                TTSEngine.kokoroFallbackActive = false;
-                            }
-                            AppState.get().ttsUseKokoro = isChecked;
-                            AppState.get().save(activity);
-                            textEngine.setText(AppState.get().ttsUseKokoro ? KokoroVoices.display(AppState.get().ttsKokoroVoice) : TTSEngine.get().getCurrentEngineName());
-                            TTSEngine.get().stop();
-                            org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
-                        } catch (Throwable t) {
-                            // toggling the voice must never crash the reader session
-                            LOG.e(t);
-                        }
-                    }
-                });
                 // ---- system engine voice + custom (recorded/imported) voices ----
                 final TextView ttsSystemVoice = view.findViewById(R.id.ttsSystemVoice);
                 final TextView ttsSystemVoiceValue = view.findViewById(R.id.ttsSystemVoiceValue);
@@ -954,60 +917,6 @@ public class DragingDialogs {
                     }
                 });
 
-                // ---- DeepFilterNet3 voice enhancement of the system TTS output ----
-                final androidx.appcompat.widget.SwitchCompat ttsVoiceEnhanceSwitch = view
-                        .findViewById(R.id.ttsVoiceEnhanceSwitch);
-                ttsVoiceEnhanceSwitch.setChecked(AppState.get().ttsVoiceEnhance);
-                tintTtsSwitch(ttsVoiceEnhanceSwitch);
-                ttsVoiceEnhanceSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
-                    @Override public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
-                        AppState.get().ttsVoiceEnhance = isChecked;
-                        AppState.get().save(activity);
-                        if (isChecked) {
-                            // warm the model up so the first utterance is not delayed
-                            com.foobnix.ai.ReuseVoicePlayer.get().prepareAsync();
-                        }
-                        TTSEngine.get().stop();
-                        org.greenrobot.eventbus.EventBus.getDefault().post(new com.foobnix.tts.TtsStatus());
-                    }
-                });
-
-                final Runnable openKokoroVoicePicker = new Runnable() {
-                    @Override public void run() {
-                        final String[] items = KokoroVoices.DISPLAY;
-                        final int checked = KokoroVoices.sidOf(AppState.get().ttsKokoroVoice);
-                        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(activity);
-                        b.setTitle(R.string.tts_kokoro_voice);
-                        b.setSingleChoiceItems(items, checked, new android.content.DialogInterface.OnClickListener() {
-                            @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                                final int sid = which;
-                                AppState.get().ttsKokoroVoice = KokoroVoices.CODES[sid];
-                                // Picking a Kokoro voice is an explicit request for the AI
-                                // engine. If the ON/OFF toggle was left OFF (easy to tap by
-                                // accident), the selection silently had no effect: preview
-                                // stayed silent and reading kept using the system TTS voice.
-                                // Auto-enable so a chosen AI voice always plays as AI.
-                                if (!AppState.get().ttsUseKokoro) {
-                                    AppState.get().ttsUseKokoro = true;
-                                    ttsKokoroSwitch.setChecked(true);
-                                }
-                                TTSEngine.kokoroFallbackActive = false;
-                                AppState.get().save(activity);
-                                ttsKokoroVoice.setText(KokoroVoices.DISPLAY[sid]);
-                                textEngine.setText(KokoroVoices.DISPLAY[sid]);
-                                KokoroEngine.get().preview(sid);
-                                dialog.dismiss();
-                            }
-                        });
-                        b.show();
-                    }
-                };
-                ttsKokoroVoice.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        openKokoroVoicePicker.run();
-                    }
-                });
-
                 // ---- word highlight switch (the word-by-word reading mode was
                 // removed: both engines read continuously and only drive the
                 // highlight, no separate audio per word) ----
@@ -1027,21 +936,6 @@ public class DragingDialogs {
                         }
                     }
                 });
-                final TextView ttsDiag = view.findViewById(R.id.ttsDiag);
-                final TextView ttsDiagNote = view.findViewById(R.id.ttsDiagNote);
-                if (TTSEngine.kokoroFallbackActive) {
-                    ttsDiagNote.setText(R.string.tts_kokoro_fallback);
-                }
-                TxtUtils.underlineTextView(ttsDiag);
-                ttsDiag.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        try {
-                            activity.startActivity(new Intent(activity, com.foobnix.tts.TtsDiagnosticsActivity.class));
-                        } catch (Exception e) {
-                            LOG.e(e);
-                        }
-                    }
-                });
 
 
                 final TextView timerTime = view.findViewById(R.id.timerTime);
@@ -1055,30 +949,6 @@ public class DragingDialogs {
                         final PackageManager pm = v.getContext().getPackageManager();
                         final java.util.regex.Pattern pkgP = java.util.regex.Pattern.compile("[?&]id=([\\w.]+)");
                         MyPopupMenu menu = new MyPopupMenu(v);
-                        // the built-in offline AI engine needs no install - offer it first
-                        menu.getMenu()
-                            .add(activity.getString(R.string.tts_engine_kokoro) + " \u2713")
-                            .setOnMenuItemClickListener(new OnMenuItemClickListener() {
-                                @Override public boolean onMenuItemClick(MenuItem item) {
-                                    try {
-                                        TTSEngine.get().stop();
-                                        AppState.get().ttsUseKokoro = true;
-                                        TTSEngine.kokoroFallbackActive = false;
-                                        // no eager model load here: the first Play
-                                        // prepares lazily (TTSEngine) - loading
-                                        // 134+ MB right in the dialog was LMK-killing
-                                        // the reader on real devices
-                                        AppState.get().save(activity);
-                                        textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                                        ttsKokoroSwitch.setChecked(true);
-                                        org.greenrobot.eventbus.EventBus.getDefault()
-                                                .post(new com.foobnix.tts.TtsStatus());
-                                    } catch (Throwable t) {
-                                        LOG.e(t);
-                                    }
-                                    return false;
-                                }
-                            });
                         for (final String key : AppState.TTS_ENGINES.keySet()) {
                             final String value = AppState.TTS_ENGINES.get(key);
                             String pkgFound = null;
@@ -1108,7 +978,6 @@ public class DragingDialogs {
                                         if (installed && pkg != null) {
                                             // already on the device: make it the active voice
                                             TTSEngine.get().stop();
-                                            AppState.get().ttsUseKokoro = false;
                                             try {
                                                 TTSEngine.get().setTTSWithEngine(pkg);
                                             } catch (Throwable t) {
@@ -1116,7 +985,6 @@ public class DragingDialogs {
                                             }
                                             AppState.get().save(activity);
                                             textEngine.setText(TTSEngine.get().getCurrentEngineName());
-                                            ttsKokoroSwitch.setChecked(false);
                                             org.greenrobot.eventbus.EventBus.getDefault()
                                                     .post(new com.foobnix.tts.TtsStatus());
                                         } else {
@@ -1250,43 +1118,35 @@ public class DragingDialogs {
                 ttsPage.setVisibility(View.GONE);
                 timerStart.setVisibility(View.GONE);
 
-                if (!AppState.get().ttsUseKokoro) {
-                    // System voice: bind the system TextToSpeech to show its
-                    // engine/language. With the offline AI voice we skip it
-                    // completely - binding janks the UI thread for nothing,
-                    // the active AI voice is already shown above.
-                    TTSEngine.get().getTTS(new OnInitListener() {
-                        @Override public void onInit(int status) {
-                            textEngine.setText(TTSEngine.get().getCurrentEngineName());
-                            ttsLang.setText(TTSEngine.get().getCurrentLang());
-                            TxtUtils.bold(ttsLang);
-                        }
-                    });
+                // bind the system TextToSpeech to show its engine/language
+                TTSEngine.get().getTTS(new OnInitListener() {
+                    @Override public void onInit(int status) {
+                        textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                        ttsLang.setText(TTSEngine.get().getCurrentLang());
+                        TxtUtils.bold(ttsLang);
+                    }
+                });
 
-                    controller.runTimer(1000, new Runnable() {
-                        @Override public void run() {
-                            textEngine.setText(TTSEngine.get().getCurrentEngineName());
-                            ttsLang.setText(TTSEngine.get().getCurrentLang());
-                            TxtUtils.bold(ttsLang);
-                        }
-                    });
+                controller.runTimer(1000, new Runnable() {
+                    @Override public void run() {
+                        textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                        ttsLang.setText(TTSEngine.get().getCurrentLang());
+                        TxtUtils.bold(ttsLang);
+                    }
+                });
 
-                    textEngine.setText(TTSEngine.get().getCurrentEngineName());
-                    ttsLang.setText(TTSEngine.get().getCurrentLang());
-                    TxtUtils.bold(ttsLang);
-                }
+                textEngine.setText(TTSEngine.get().getCurrentEngineName());
+                ttsLang.setText(TTSEngine.get().getCurrentLang());
+                TxtUtils.bold(ttsLang);
 
                 View ttsSettings = view.findViewById(R.id.ttsSettings);
-                // full engine picker: the built-in AI voice plus every system
-                // TTS engine installed on the device (Google TTS, RHVoice,
-                // SherpaTTS, ...). No TextToSpeech binding - PackageManager only.
+                // full engine picker: every system TTS engine installed on the
+                // device (Google TTS, RHVoice, SherpaTTS, ...). No TextToSpeech
+                // binding - PackageManager only.
                 final Runnable openEnginePicker = new Runnable() {
                     @Override public void run() {
                         final List<String> labels = new ArrayList<String>();
-                        final List<String> pkgs = new ArrayList<String>(); // null = built-in Kokoro
-                        labels.add(activity.getString(R.string.tts_engine_kokoro) + " \u2014 "
-                                           + KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                        pkgs.add(null);
+                        final List<String> pkgs = new ArrayList<String>();
                         String currentPkg = null;
                         try {
                             currentPkg = android.provider.Settings.Secure.getString(activity.getContentResolver(),
@@ -1322,15 +1182,12 @@ public class DragingDialogs {
                                 pkgs.add(pkg);
                             }
                         }
-                        int checkedIdx = 0;
-                        if (!AppState.get().ttsUseKokoro) {
-                            checkedIdx = -1;
-                            if (currentPkg != null) {
-                                checkedIdx = pkgs.indexOf(currentPkg);
-                            }
-                            if (checkedIdx < 0) {
-                                checkedIdx = pkgs.indexOf("com.google.android.tts");
-                            }
+                        int checkedIdx = -1;
+                        if (currentPkg != null) {
+                            checkedIdx = pkgs.indexOf(currentPkg);
+                        }
+                        if (checkedIdx < 0) {
+                            checkedIdx = pkgs.indexOf("com.google.android.tts");
                         }
                         final int checked = checkedIdx;
                         android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(activity);
@@ -1339,23 +1196,13 @@ public class DragingDialogs {
                                 new android.content.DialogInterface.OnClickListener() {
                                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
                                         TTSEngine.get().stop();
-                                        if (which == 0) {
-                                            // built-in offline AI voice
-                                            AppState.get().ttsUseKokoro = true;
-                                            TTSEngine.kokoroFallbackActive = false;
-                                            // no eager model load: first Play prepares lazily
-                                            textEngine.setText(KokoroVoices.display(AppState.get().ttsKokoroVoice));
-                                        } else {
-                                            final String pkg = pkgs.get(which);
-                                            AppState.get().ttsUseKokoro = false;
-                                            try {
-                                                TTSEngine.get().setTTSWithEngine(pkg);
-                                            } catch (Throwable t) {
-                                                LOG.e(t);
-                                            }
-                                            textEngine.setText(labels.get(which));
+                                        final String pkg = pkgs.get(which);
+                                        try {
+                                            TTSEngine.get().setTTSWithEngine(pkg);
+                                        } catch (Throwable t) {
+                                            LOG.e(t);
                                         }
-                                        ttsKokoroSwitch.setChecked(AppState.get().ttsUseKokoro);
+                                        textEngine.setText(labels.get(which));
                                         AppState.get().save(activity);
                                         org.greenrobot.eventbus.EventBus.getDefault()
                                                 .post(new com.foobnix.tts.TtsStatus());

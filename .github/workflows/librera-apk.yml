@@ -1,4 +1,4 @@
-name: Build Librera AI APK
+name: Build Librera APK
 
 on:
   push:
@@ -92,73 +92,10 @@ jobs:
           }
           GSJ
 
-      - name: Bundle Inflect-Nano-v2 models
-        run: |
-          set -e
-          python3 - <<'PYEOF'
-          import hashlib, json, urllib.request, os, sys
-          REPO = 'owensong/Inflect-Nano-v2-ONNX'
-          REPO_PIN = open('inflect-pin.txt').read().strip()
-          meta = json.load(urllib.request.urlopen('https://huggingface.co/api/models/' + REPO))
-          if meta.get('sha') != REPO_PIN:
-              sys.exit('Inflect ONNX repo pin mismatch: repo sha %s != pinned %s' % (meta.get('sha'), REPO_PIN))
-          # integrity: official checksums from the pinned repo
-          sums_url = 'https://huggingface.co/%s/resolve/%s/onnx/checksums.sha256' % (REPO, REPO_PIN)
-          sums = {}
-          for line in urllib.request.urlopen(sums_url).read().decode().splitlines():
-              h, _, name = line.partition('  ')
-              sums[os.path.basename(name.strip())] = h.strip()
-          dest = 'app/src/main/assets/inflect'
-          os.makedirs(dest, exist_ok=True)
-          for name in ('duration.onnx', 'decode.onnx'):
-              url = 'https://huggingface.co/%s/resolve/%s/onnx/%s' % (REPO, REPO_PIN, name)
-              out = os.path.join(dest, name)
-              urllib.request.urlretrieve(url, out)
-              h = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-              if sums.get(name) and h != sums[name]:
-                  sys.exit('%s checksum mismatch: %s != %s' % (name, h, sums[name]))
-              print('bundled', name, os.path.getsize(out), 'bytes, sha256 ok')
-          # the espeak-en-us lexicon is committed under assets/inflect - just sanity-check it
-          lex = os.path.join(dest, 'lexicon-en.txt')
-          cnt = sum(1 for _ in open(lex, encoding='utf-8'))
-          assert cnt >= 100000, 'lexicon-en.txt looks incomplete: %d entries' % cnt
-          print('lexicon-en.txt entries:', cnt)
-          PYEOF
-          du -sh app/src/main/assets/inflect
-
-      # NOTE: DeepFilterNet3 was removed in 7355 (user feedback: no audible
-      # benefit on clean TTS audio, yet it cost APK size and RAM for 3 extra
-      # ORT sessions - a crash risk on low-memory devices reading PDFs).
-      # The audible loudness/clarity polish (VoicePolish, pure Java) remains.
-
-      # NOTE: the TTS engine runs through the ONNX Runtime AAR directly
-      # (duration + decode graphs), so no native sherpa-onnx build is needed
-      # anymore - that used to be the longest CI step and it also shipped a
-      # duplicated ORT copy inside the APK.
-
       - name: Build APK (fdroid flavor, release-optimized R8)
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleFdroidRelease --no-daemon --stacktrace
-
-      - name: Verify APK contents + JNI symbols
-        run: |
-          APK=$(find app/build/outputs/apk -name "*.apk" | grep -i arm64 | head -1)
-          if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk -name "*.apk" | sort | head -1); fi
-          echo "Verifying: $APK"
-          python3 scripts/ci/verify_apk.py "$APK"
-
-      - name: Functional TTS smoke test (real synthesis with the shipped model)
-        run: |
-          APK=$(find app/build/outputs/apk -name "*.apk" | grep -i arm64 | head -1)
-          if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk -name "*.apk" | sort | head -1); fi
-          rm -rf /tmp/ktest && mkdir -p /tmp/ktest
-          unzip -q "$APK" 'assets/inflect/*' -d /tmp/ktest
-          D=/tmp/ktest/assets/inflect
-          du -sh "$D"
-          pip install -q onnxruntime
-          python3 scripts/ci/tts_smoke_test.py "$D" /tmp/ktest/test.wav
-          python3 scripts/ci/check_wav.py /tmp/ktest/test.wav
 
       - name: Collect APKs
         run: |
@@ -176,11 +113,11 @@ jobs:
             find app/build/outputs -type f | head -30
             exit 1
           fi
-          cp "$APK" dist/Librera-AI-TTS.apk
+          cp "$APK" dist/Librera.apk
           X86=$(find app/build/outputs/apk -name "*.apk" | grep -i "x86_64" | head -1)
-          if [ -n "$X86" ]; then cp "$X86" dist/Librera-AI-TTS-x86_64.apk; fi
+          if [ -n "$X86" ]; then cp "$X86" dist/Librera-x86_64.apk; fi
           ARM=$(find app/build/outputs/apk -name "*.apk" | grep -i -- "-arm\." | head -1)
-          if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-AI-TTS-arm32.apk; fi
+          if [ -n "$ARM" ]; then cp "$ARM" dist/Librera-arm32.apk; fi
           ls -la dist
 
       - name: Verify installability (apksigner signature + 16KB alignment)
@@ -188,13 +125,13 @@ jobs:
           set -e
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           echo "apksigner: $APKSIGNER"
-          "$APKSIGNER" verify --verbose dist/Librera-AI-TTS.apk
-          if [ -f dist/Librera-AI-TTS-arm32.apk ]; then
-            "$APKSIGNER" verify --verbose dist/Librera-AI-TTS-arm32.apk
+          "$APKSIGNER" verify --verbose dist/Librera.apk
+          if [ -f dist/Librera-arm32.apk ]; then
+            "$APKSIGNER" verify --verbose dist/Librera-arm32.apk
           fi
           python3 - <<'PY'
           import struct, zipfile
-          for apk in ['dist/Librera-AI-TTS.apk', 'dist/Librera-AI-TTS-arm32.apk']:
+          for apk in ['dist/Librera.apk', 'dist/Librera-arm32.apk']:
               try:
                   z = zipfile.ZipFile(apk)
               except OSError:
@@ -207,6 +144,8 @@ jobs:
               bad = [i.filename for i in z.infolist()
                      if i.filename.endswith('.so') and i.compress_type == 0 and off(i) % 16384]
               assert not bad, '%s: .so not 16KB-aligned: %s' % (apk, bad)
+              assert not [i for i in z.namelist() if 'sherpa' in i or 'kokoro' in i], \
+                  '%s: stale AI TTS entries found' % apk
               print('%s: signature + 16KB alignment OK (%d entries)' % (apk, len(z.namelist())))
           PY
 
@@ -263,12 +202,7 @@ jobs:
           path: |
             logcat.txt
             logcat-tts.txt
-            logcat-tts-ru.txt
-            logcat-tts-pdf.txt
-            logcat-trim.txt
-            logcat-tts-dialog.txt
             ui-reader.xml
-            ui-ttsdlg2.xml
             ui.xml
           if-no-files-found: ignore
 
@@ -303,10 +237,8 @@ jobs:
 
       - name: Run app on emulator (Android 14 / api 34, arm64 - what real phones run)
         env:
-          TEST_APK: dist/Librera-AI-TTS.apk
+          TEST_APK: dist/Librera.apk
           TTS_SLEEP: "600"
-          RU_SLEEP: "600"
-          STRICT_RU: "0"
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -328,7 +260,6 @@ jobs:
             logcat.txt
             logcat-tts.txt
             ui-reader.xml
-            logcat-tts-ru.txt
             ui.xml
           if-no-files-found: ignore
 
@@ -350,7 +281,7 @@ jobs:
           import json, os, time, urllib.request
           REPO = 'FreedoomForm/LibreraReader'
           TAG = 'librera-apk-latest'
-          KEEP = {'Librera-AI-TTS.apk', 'Librera-AI-TTS-arm32.apk', 'SHA256SUMS.txt'}
+          KEEP = {'Librera.apk', 'Librera-arm32.apk', 'SHA256SUMS.txt'}
           H = {'Authorization': 'token ' + os.environ['GITHUB_TOKEN'], 'User-Agent': 'ci-cleanup'}
           try:
               url = 'https://api.github.com/repos/%s/releases/tags/%s?nocache=%d' % (REPO, TAG, time.time_ns() % 10**9)
@@ -371,18 +302,18 @@ jobs:
       - name: Prepare release folder (only user-facing APKs)
         run: |
           mkdir -p dist/release
-          cp dist/Librera-AI-TTS.apk dist/release/
-          if [ -f dist/Librera-AI-TTS-arm32.apk ]; then
-            cp dist/Librera-AI-TTS-arm32.apk dist/release/
+          cp dist/Librera.apk dist/release/
+          if [ -f dist/Librera-arm32.apk ]; then
+            cp dist/Librera-arm32.apk dist/release/
           fi
           ls -la dist/release
 
       - name: Generate SHA256SUMS (published files only)
         run: |
           cd dist/release
-          sha256sum Librera-AI-TTS.apk > SHA256SUMS.txt
-          if [ -f Librera-AI-TTS-arm32.apk ]; then
-            sha256sum Librera-AI-TTS-arm32.apk >> SHA256SUMS.txt
+          sha256sum Librera.apk > SHA256SUMS.txt
+          if [ -f Librera-arm32.apk ]; then
+            sha256sum Librera-arm32.apk >> SHA256SUMS.txt
           fi
           cat SHA256SUMS.txt
 
@@ -390,7 +321,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: librera-apk-latest
-          name: "Librera Reader - Offline AI TTS (Inflect-Nano-v2)"
+          name: "Librera Reader"
           files: dist/release/*
           prerelease: true
           allow_updates: true

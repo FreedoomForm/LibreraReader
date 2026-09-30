@@ -281,14 +281,14 @@ import java.util.List;
             } else {
                 // permanently denied: the system dialog never shows and Play
                 // would do nothing at all - at least tell the user why
-                android.widget.Toast.makeText(context, R.string.tts_kokoro_notif,
+                android.widget.Toast.makeText(context, R.string.tts_notif_permission,
                         android.widget.Toast.LENGTH_LONG).show();
                 ActivityCompat.requestPermissions(activity,
                         new String[]{Manifest.permission.POST_NOTIFICATIONS}, 11);
             }
             return false;
         }
-        if (!AppState.get().ttsUseKokoro && TTSEngine.get()
+        if (TTSEngine.get()
                      .isInit() && TTSEngine.get()
                                            .getCurrentLang()
                                            .equals("---")) {
@@ -1041,8 +1041,11 @@ import java.util.List;
     /** Single worker for TTS document work: keeps Play responsive. */
     private final java.util.concurrent.ExecutorService ttsWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
 
-    /** posts the on-page word highlight for the flat word index (both engines:
-     *  Kokoro playhead events and the system voice's onRangeStart) */
+    /** log tag of the TTS pipeline diagnostics (always-on, visible in release builds) */
+    private static final String TTS_DIAG = "TtsDiag";
+
+    /** posts the on-page word highlight for the flat word index (the system
+     *  voice's onRangeStart drives it) */
     private void fireWordHighlight(final int idx) {
         if (idx < 0) {
             return;
@@ -1050,7 +1053,7 @@ import java.util.List;
         final android.graphics.RectF wordRect = TTSEngine.get().getTTSWordRect(idx);
         EventBus.getDefault()
                 .post(new MessageTTSWord(AppSP.get().lastBookPage, idx, wordRect));
-        android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+        android.util.Log.i(TTS_DIAG,
                 "tts word event: page=" + AppSP.get().lastBookPage
                         + " idx=" + idx + " rect=" + (wordRect != null));
     }
@@ -1089,9 +1092,8 @@ import java.util.List;
             }
             String pageHTML = page.getPageHTML();
             // capture the page's word boxes BEFORE the page is recycled: the
-            // word highlight matches each spoken word against them (Kokoro
-            // fires "ttsW<idx>" from the playhead, the system voice maps
-            // onRangeStart char offsets - both engines, continuous reading)
+            // word highlight maps the system voice's onRangeStart char offsets
+            // against them (continuous reading)
             try {
                 TextWord[][] words2d = page.getText();
                 List<TextWord> flat = new ArrayList<TextWord>();
@@ -1115,11 +1117,11 @@ import java.util.List;
                 TTSEngine.get().setTTSSourceWords(flat, offset);
                 // always-on marker: the CI emulator test asserts this line,
                 // and it lets a user logcat show where the highlight breaks
-                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                android.util.Log.i(TTS_DIAG,
                         "tts words: captured=" + flat.size() + " offset=" + offset);
             } catch (Throwable t) {
                 LOG.e(t);
-                android.util.Log.i(com.foobnix.ai.KokoroEngine.DIAG_TAG,
+                android.util.Log.i(TTS_DIAG,
                         "tts words FAILED: " + t);
                 TTSEngine.get().setTTSSourceWords(null, 0);
             }
@@ -1166,21 +1168,9 @@ import java.util.List;
 
             if (Build.VERSION.SDK_INT >= 15) {
                 TTSEngine.get()
-                         .setKokoroProgressListenerCompat(new UtteranceProgressListener() {
+                         .setUtteranceProgressListenerCompat(new UtteranceProgressListener() {
                              @Override public void onStart(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onStart", utteranceId);
-                                 // sentence clips with a word list: highlight the
-                                 // word being spoken (AI voice protocol)
-                                 if (utteranceId != null && utteranceId.startsWith(TTSEngine.WORD_SIGNAL)
-                                         && AppState.get().ttsWordHighlight) {
-                                     try {
-                                         final int idx = Integer.parseInt(
-                                                 utteranceId.substring(TTSEngine.WORD_SIGNAL.length()));
-                                         fireWordHighlight(idx);
-                                     } catch (NumberFormatException e) {
-                                         LOG.d(TAG, "bad word utterance id", utteranceId);
-                                     }
-                                 }
                              }
 
                              /**
@@ -1200,7 +1190,7 @@ import java.util.List;
 
                              @Override public void onError(String utteranceId) {
                                  LOG.d(TAG, "onUtteranceCompleted onError", utteranceId);
-                                 if (utteranceId == null || !utteranceId.equals(TTSEngine.UTTERANCE_ID_DONE)) {
+                                 if (!utteranceId.equals(TTSEngine.UTTERANCE_ID_DONE)) {
                                      return;
                                  }
                                  stopMediaSesstionAndReleaweWakeLock();
@@ -1211,12 +1201,6 @@ import java.util.List;
                              @Override public void onDone(String utteranceId) {
 
                                  LOG.d(TAG, "onUtteranceCompleted", utteranceId);
-                                 // conclude the word-range capability probe when the
-                                 // watched utterance (or the page) finishes
-                                 TTSEngine.get().noteSystemRangeProbe(utteranceId);
-                                 if (utteranceId == null) {
-                                     return;
-                                 }
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 
@@ -1252,11 +1236,8 @@ import java.util.List;
                          });
             } else {
                 TTSEngine.get()
-                         .setKokoroLegacyListenerCompat(new OnUtteranceCompletedListener() {
+                         .setLegacyUtteranceListenerCompat(new OnUtteranceCompletedListener() {
                              @Override public void onUtteranceCompleted(String utteranceId) {
-                                 if (utteranceId == null) {
-                                     return;
-                                 }
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 

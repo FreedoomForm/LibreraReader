@@ -3,7 +3,6 @@ package com.foobnix;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import com.foobnix.model.AppSP;
 import com.foobnix.model.AppProfile;
-import com.foobnix.ai.KokoroEngine;
 import com.foobnix.model.AppState;
 
 import android.app.Application;
@@ -83,60 +82,6 @@ public class LibreraApp extends Application {
         AppsConfig.init(this);
         Dips.init(this);
         Prefs.get().init(this);
-
-        try {
-            // Crash breadcrumbs: record every uncaught exception (any thread)
-            // to a small file that SURVIVES the process death. "Kicked to the
-            // main page" reports are undiagnosable without evidence - the
-            // TTS diagnostics screen shows this file next to the OS exit
-            // history (ApplicationExitInfo), covering java crashes, native
-            // crashes, ANR and low-memory kills alike.
-            final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
-            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-                @Override public void uncaughtException(Thread t, Throwable e) {
-                    try {
-                        java.io.File f = new java.io.File(getExternalFilesDir(null), "tts_crash.log");
-                        java.io.PrintWriter pw = new java.io.PrintWriter(new java.io.FileWriter(f, true));
-                        pw.println("==== " + new java.util.Date() + " thread=" + t.getName());
-                        e.printStackTrace(pw);
-                        pw.println();
-                        pw.close();
-                    } catch (Throwable ignore) {
-                    }
-                    if (prevHandler != null) {
-                        prevHandler.uncaughtException(t, e);
-                    }
-                }
-            });
-        } catch (Throwable ignore) {
-        }
-
-        try {
-            // One-time migration: older builds shipped with the system TTS selected and
-            // the saved profile kept overriding the new Kokoro default. Flip it once so
-            // existing installs get the offline AI voice without touching settings.
-            if (AppSP.get() != null && !AppSP.get().kokoroDefaultMigrated) {
-                AppState.get().ttsUseKokoro = true;
-                // AppProfile.syncState is created only when the profile loads (later
-                // than app onCreate); saving earlier NPEs on a null File in the writer.
-                if (AppProfile.syncState != null) {
-                    AppSP.get().kokoroDefaultMigrated = true;
-                    AppState.get().save(this);
-                    LOG.d("LibreraApp", "migration: offline AI voice (Kokoro) enabled by default");
-                }
-            }
-        } catch (Throwable t) {
-            LOG.e(t);
-        }
-
-        // NO startup warm-up of the AI voice anymore. The engine holds
-        // ~134 MB resident (transient peaks ~211 MB per decoded chunk) and
-        // pinning that from app start pushed every reader session into
-        // lowmemorykiller territory ("kicked to the main page" reports kept
-        // coming even after the 7356 memory fixes). The model is now loaded
-        // ONLY on the actual first Play (TTSEngine.kokoroSpeakLocked lazy
-        // prepareAsync with the 120s system-voice watchdog) or on an explicit
-        // voice preview - exactly like the Kokoro-7M era did it.
 
         try {
             if (AppsConfig.isShowAdsInApp(this)) {
@@ -292,25 +237,6 @@ public class LibreraApp extends Application {
         LOG.d("onTrimMemory", level);
         IMG.clearMemoryCache();
         TempHolder.get().loadingCancelled.set(true);
-        // give the AI-engine memory back BEFORE the system starts killing:
-        // the idle engine holds ~135 MB resident and with a memory-heavy PDF
-        // open that used to push the reader over the LMK line ("kicked to the
-        // main page" bug). Released only while nothing is playing; the next
-        // Play press re-initializes the engine in a couple of seconds.
-        // releaseAsync() frees ~134 MB of native state OFF the main thread:
-        // tearing the ORT sessions down on the UI thread froze the reader for
-        // seconds on slow devices and earned an ANR dialog on the emulator.
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
-            try {
-                com.foobnix.ai.KokoroEngine k = com.foobnix.ai.KokoroEngine.get();
-                if (k.isReady() && !k.isBusy()) {
-                    k.releaseAsync();
-                    android.util.Log.i("KokoroDiag", "engine release scheduled on trim level " + level);
-                }
-            } catch (Throwable t) {
-                LOG.e(t);
-            }
-        }
     }
 
     @Override

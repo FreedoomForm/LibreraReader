@@ -299,11 +299,10 @@ public class AppState {
     }
 
     static {
-        // Only two voices are offered on purpose: the built-in offline AI engine
-        // (Kokoro, needs no install) and the locally installed Google TTS.
-        // Third-party engines (RHVoice, SherpaTTS, Acapela, Vocalizer...) were
-        // removed at the user's request - they duplicated the AI voice and
-        // cluttered the picker.
+        // Only the locally installed Google TTS is offered: it ships with the
+        // device and needs no extra download. Third-party engines (RHVoice,
+        // SherpaTTS, Acapela, Vocalizer...) were removed at the user's request
+        // - they cluttered the picker.
         TTS_ENGINES.put("Google TTS (local)",
                 "https://play.google.com/store/apps/details?id=com.google.android.tts");
     }
@@ -409,18 +408,11 @@ public class AppState {
     @IgnoreHashCode public boolean ttsReadBySentences = true;
     @IgnoreHashCode public String ttsSentecesDivs = TTS_PUNCUATIONS;
     @IgnoreHashCode public boolean ttsTunnOnLastWord = false;
-    // Offline AI TTS (Kokoro-7M-Distill, bundled in the APK)
-    public volatile boolean ttsUseKokoro = true;
-    public volatile String ttsKokoroVoice = "af_msa";
     // Selected voice of the system TextToSpeech engine (Voice.getName(),
     // "" = the engine's default voice). Each engine type offers its own list.
     public volatile String ttsSystemVoice = "";
-    // NVIDIA RE-USE real-time voice enhancement of the SYSTEM TTS output.
-    // Runs per utterance (synthesizeToFile -> enhance -> AudioTrack); on
-    // devices too slow to keep up it disables itself and reads unenhanced.
-    public volatile boolean ttsVoiceEnhance = false;
-    // Word-by-word reading was removed at the user's request: both engines now
-    // read continuously and only drive the word highlight. The flag is kept
+    // Word-by-word reading was removed at the user's request: the engine now
+    // reads continuously and only drives the word highlight. The flag is kept
     // (always false) so old settings files load without errors.
     @Deprecated public volatile boolean ttsWordMode = false;
     // Highlight the word that is currently being spoken on the book page

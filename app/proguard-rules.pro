@@ -117,10 +117,3 @@
 -keepnames class com.foobnix.tts.MessageTTSWord {
     *;
 }
-
-# ONNX Runtime (ORT AAR): the native libonnxruntime.so resolves Java classes
-# and methods by exact name (FindClass / GetMethodID) while OrtSession.run()
-# executes. R8 renaming/removal breaks the call with JNI errors that are
-# fatal under CheckJNI (emulators) - both the Inflect TTS graphs and the
-# DeepFilterNet3 voice enhancement go through this runtime.
--keep class ai.onnxruntime.** { *; }

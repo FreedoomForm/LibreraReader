@@ -97,10 +97,6 @@
         </provider>
 
         <activity
-            android:name="com.foobnix.tts.TtsDiagnosticsActivity"
-            android:exported="false" />
-
-        <activity
             android:name="com.foobnix.zipmanager.SendReceiveActivity"
             android:exported="true"
             android:launchMode="singleTask">

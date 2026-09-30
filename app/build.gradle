@@ -7,7 +7,7 @@ def taskName = getGradle().getStartParameter().getTaskRequests().toString()
 
 
 ext {
-    FDroidCodeNumber = 7360
+    FDroidCodeNumber = 7361
     FDroidVersionNumber = "9.6.25"
 }
 
@@ -117,10 +117,6 @@ android {
             include "x86", "x86_64", "armeabi-v7a", "arm64-v8a"
             universalApk = true
         }
-    }
-
-    androidResources {
-        noCompress 'onnx'
     }
 
     flavorDimensions.add("version")
@@ -281,15 +277,6 @@ dependencies {
     proImplementation project(':libPro')
     fdroidImplementation project(':libPro')
     implementation project(':libReflow')
-
-    // NVIDIA RE-USE voice enhancement (ONNX Runtime, Java API)
-    // 1.30.0 (was 1.20.0 since the Kokoro-7M days): CI emulator run of 7358
-    // caught a real SIGSEGV (null deref) INSIDE libonnxruntime.so during a
-    // ~2.5-minute continuous PDF synthesis - process died, app restarted on
-    // the library page: EXACTLY the "kicked to the main page" reports.
-    // Two years of ORT fixes lie between 1.20 and 1.30; API verified compatible
-    // (createTensor/getFloatBuffer/getInfo/getShape/setCPUArenaAllocator all present).
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.30.0'
 
     //implementation project(":shared")
 
